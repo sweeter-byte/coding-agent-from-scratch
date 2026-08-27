@@ -21,11 +21,19 @@ def main():
     try:
         result = agent.run(task)
 
-        print("\n========== Final Answer ==========")
+        print()
+        print("========================================")
+        print("Final Answer")
+        print("========================================")
         print(result)
 
+    except KeyboardInterrupt:
+        print()
+        print("Agent interrupted by user.")
+
     except Exception as e:
-        print("\nAgent failed:")
+        print()
+        print("Agent failed:")
         print(e)
 
 
