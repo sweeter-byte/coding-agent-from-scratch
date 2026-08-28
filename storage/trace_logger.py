@@ -210,6 +210,28 @@ class TraceLogger:
             ),
         )
 
+    def log_session_resume(
+        self,
+        restored_step: int,
+        next_step: int,
+        previous_status: str | None,
+    ) -> None:
+        """
+        Record that an existing persisted session is being resumed.
+        """
+
+        self.log(
+            "session_resume",
+            step=restored_step,
+            restored_step=(
+                restored_step
+            ),
+            next_step=next_step,
+            previous_status=(
+                previous_status
+            ),
+        )
+
     def log_agent_step(
         self,
         step: int,

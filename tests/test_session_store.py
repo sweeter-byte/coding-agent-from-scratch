@@ -117,3 +117,19 @@ def test_atomic_save_leaves_no_temporary_files(tmp_path: Path):
     )
 
     assert list(directory.glob("*.tmp-*")) == []
+
+
+def test_list_sessions_includes_lightweight_state(tmp_path: Path):
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create_session(metadata={"task": "demo"})
+
+    store.save(
+        session_id,
+        messages=[{"role": "user", "content": "hello"}],
+        state={"step": 5, "write_version": 2},
+    )
+
+    sessions = store.list_sessions()
+
+    assert sessions[0]["state"]["step"] == 5
+    assert sessions[0]["state"]["write_version"] == 2

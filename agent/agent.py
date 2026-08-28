@@ -1,6 +1,7 @@
 import json
 import platform
 
+from pathlib import Path
 from time import perf_counter
 
 from .config import (
@@ -234,8 +235,8 @@ class CodingAgent:
             SessionStore()
         )
 
-        # A new TraceLogger is created for every run(),
-        # because every task should have an independent trace.
+        # TraceLogger is bound to a persistent session ID. New tasks
+        # create a new trace; resumed tasks append to the same trace.
         self.trace_logger: (
             TraceLogger | None
         ) = None
@@ -257,7 +258,7 @@ class CodingAgent:
         )
 
     # ========================================================
-    # Main Agent Loop
+    # Session lifecycle
     # ========================================================
 
     def run(
@@ -265,49 +266,64 @@ class CodingAgent:
         user_task: str,
     ) -> str:
         """
-        Execute one coding task.
-
-        Main loop:
-
-            initialize session
-                    ↓
-                context
-                    ↓
-                 model
-                    ↓
-            parsed response
-                    ↓
-               tool calls
-                    ↓
-            local execution
-                    ↓
-              observations
-                    ↓
-           persist + trace
-                    ↓
-             next context
-                    ↓
-                   ...
-                    ↓
-          termination policy
+        Start a new coding task and execute the autonomous loop.
         """
 
-        if not user_task.strip():
+        self._initialize_new_session(
+            user_task
+        )
+
+        return self._execute_loop(
+            start_step=1
+        )
+
+    def resume(
+        self,
+        session_id: str,
+    ) -> str:
+        """
+        Resume a previously persisted non-completed session.
+
+        The same session ID, conversation history, workspace and
+        durable AgentState are reused. The next model call starts at
+        the step following the last persisted step.
+        """
+
+        start_step = (
+            self._restore_session(
+                session_id
+            )
+        )
+
+        return self._execute_loop(
+            start_step=start_step
+        )
+
+    def _initialize_new_session(
+        self,
+        user_task: str,
+    ) -> None:
+        """
+        Initialize history, state, persistence and tracing for a new
+        task.
+        """
+
+        if (
+            not isinstance(
+                user_task,
+                str,
+            )
+            or not user_task.strip()
+        ):
             raise ValueError(
                 "user_task cannot be empty."
             )
 
-        self.current_task = user_task
-
-        # ----------------------------------------------------
-        # Reset runtime state
-        # ----------------------------------------------------
+        self.current_task = (
+            user_task.strip()
+        )
 
         self.state.reset()
-
-        # ----------------------------------------------------
-        # Initialize conversation
-        # ----------------------------------------------------
 
         system_prompt = (
             self._build_system_prompt()
@@ -315,18 +331,14 @@ class CodingAgent:
 
         self.history.reset(
             system_prompt=system_prompt,
-            user_task=user_task,
+            user_task=self.current_task,
         )
-
-        # ----------------------------------------------------
-        # Create persistent session
-        # ----------------------------------------------------
 
         self.session_id = (
             self.session_store
             .create_session(
                 metadata={
-                    "task": user_task,
+                    "task": self.current_task,
                     "model": (
                         self.config.model
                     ),
@@ -334,13 +346,10 @@ class CodingAgent:
                         self.config.workspace
                     ),
                     "status": "running",
+                    "error": None,
                 }
             )
         )
-
-        # ----------------------------------------------------
-        # Trace uses the same ID as the session
-        # ----------------------------------------------------
 
         self.trace_logger = (
             TraceLogger(
@@ -348,38 +357,283 @@ class CodingAgent:
             )
         )
 
-        # ----------------------------------------------------
-        # Persist initial history immediately
-        # ----------------------------------------------------
-
         self._save_session(
             status="running"
         )
 
         self.trace_logger.log_agent_start(
-            task=user_task,
+            task=self.current_task,
             model=self.config.model,
             workspace=(
                 self.config.workspace
             ),
         )
 
-        try:
-            # ------------------------------------------------
-            # Obtain schemas through ToolRegistry
-            # ------------------------------------------------
+    def _restore_session(
+        self,
+        session_id: str,
+    ) -> int:
+        """
+        Restore a persisted session and return the next step number.
 
+        Conversation state and filesystem state must refer to the same
+        workspace. Otherwise model history could describe files that
+        do not exist in the workspace currently exposed to tools.
+        """
+
+        session = (
+            self.session_store
+            .load(
+                session_id
+            )
+        )
+
+        metadata = session.get(
+            "metadata",
+            {},
+        )
+
+        if not isinstance(
+            metadata,
+            dict,
+        ):
+            raise ValueError(
+                "Invalid session metadata."
+            )
+
+        previous_status = (
+            metadata.get(
+                "status"
+            )
+        )
+
+        if previous_status == "completed":
+            raise ValueError(
+                "Completed sessions cannot be resumed."
+            )
+
+        allowed_statuses = {
+            None,
+            "running",
+            "interrupted",
+            "failed",
+        }
+
+        if (
+            previous_status
+            not in allowed_statuses
+        ):
+            raise ValueError(
+                "Session has an unsupported status: "
+                f"{previous_status}"
+            )
+
+        task = metadata.get(
+            "task"
+        )
+
+        if (
+            not isinstance(
+                task,
+                str,
+            )
+            or not task.strip()
+        ):
+            raise ValueError(
+                "Stored session has no valid task."
+            )
+
+        stored_workspace = (
+            metadata.get(
+                "workspace"
+            )
+        )
+
+        if stored_workspace is not None:
+            if not isinstance(
+                stored_workspace,
+                str,
+            ):
+                raise ValueError(
+                    "Stored session workspace is invalid."
+                )
+
+            stored_workspace_path = (
+                Path(
+                    stored_workspace
+                )
+                .expanduser()
+                .resolve()
+            )
+
+            current_workspace_path = (
+                self.config.workspace
+                .expanduser()
+                .resolve()
+            )
+
+            if (
+                stored_workspace_path
+                != current_workspace_path
+            ):
+                raise ValueError(
+                    "Session workspace does not match "
+                    "the current workspace. "
+                    f"Stored: {stored_workspace_path}; "
+                    f"Current: {current_workspace_path}"
+                )
+
+        messages = session.get(
+            "messages",
+            [],
+        )
+
+        if not isinstance(
+            messages,
+            list,
+        ):
+            raise ValueError(
+                "Invalid session messages."
+            )
+
+        state_data = session.get(
+            "state",
+            {},
+        )
+
+        if not isinstance(
+            state_data,
+            dict,
+        ):
+            raise ValueError(
+                "Invalid persisted AgentState."
+            )
+
+        # Restore durable in-memory state only after all basic session
+        # structure checks have passed.
+        self.history.restore(
+            messages
+        )
+
+        self.state.restore(
+            state_data
+        )
+
+        restored_step = (
+            self.state.step
+        )
+
+        # A new process should not inherit an old consecutive-error
+        # streak, but it must keep durable task progress.
+        self.state.prepare_for_resume()
+
+        self.current_task = (
+            task.strip()
+        )
+
+        self.session_id = session_id
+
+        self.trace_logger = (
+            TraceLogger(
+                run_id=session_id
+            )
+        )
+
+        next_step = (
+            restored_step + 1
+        )
+
+        if (
+            next_step
+            > self.config.max_steps
+        ):
+            self.trace_logger.log(
+                "session_resume_rejected",
+                step=restored_step,
+                previous_status=(
+                    previous_status
+                ),
+                configured_max_steps=(
+                    self.config.max_steps
+                ),
+            )
+
+            raise RuntimeError(
+                "This session has already reached "
+                f"step {restored_step}. Resume it with "
+                "a larger --max-steps value."
+            )
+
+        self._save_session(
+            status="running"
+        )
+
+        self.trace_logger.log_session_resume(
+            restored_step=restored_step,
+            next_step=next_step,
+            previous_status=(
+                previous_status
+            ),
+        )
+
+        return next_step
+
+    # ========================================================
+    # Main Agent Loop
+    # ========================================================
+
+    def _execute_loop(
+        self,
+        start_step: int,
+    ) -> str:
+        """
+        Execute the shared autonomous loop used by run() and resume().
+
+        Main loop:
+
+            current context
+                  ↓
+                model
+                  ↓
+            parsed response
+                  ↓
+              tool calls
+                  ↓
+           local execution
+                  ↓
+             observations
+                  ↓
+          persist + trace
+                  ↓
+            next context
+                  ↓
+                 ...
+                  ↓
+         termination policy
+        """
+
+        if start_step <= 0:
+            raise ValueError(
+                "start_step must be greater than 0."
+            )
+
+        if (
+            self.session_id is None
+            or self.trace_logger is None
+            or self.current_task is None
+        ):
+            raise RuntimeError(
+                "Agent session is not initialized."
+            )
+
+        try:
             tool_schemas = (
                 self.tool_registry
                 .get_schemas()
             )
 
-            # =================================================
-            # Agent loop
-            # =================================================
-
             for step in range(
-                1,
+                start_step,
                 self.config.max_steps + 1,
             ):
 
@@ -395,20 +649,12 @@ class CodingAgent:
                     step=step
                 )
 
-                # --------------------------------------------
-                # Build current LLM context
-                # --------------------------------------------
-
                 context = (
                     self.context_manager
                     .build(
                         self.history
                     )
                 )
-
-                # --------------------------------------------
-                # Trace model request
-                # --------------------------------------------
 
                 self.trace_logger.log_model_call(
                     step=step,
@@ -422,10 +668,6 @@ class CodingAgent:
                         tool_schemas
                     ),
                 )
-
-                # --------------------------------------------
-                # Call model
-                # --------------------------------------------
 
                 model_start = (
                     perf_counter()
@@ -451,10 +693,6 @@ class CodingAgent:
                     )
                     * 1000
                 )
-
-                # --------------------------------------------
-                # Parse model output
-                # --------------------------------------------
 
                 try:
                     parsed = (
@@ -519,10 +757,6 @@ class CodingAgent:
 
                     continue
 
-                # --------------------------------------------
-                # Trace successful model response
-                # --------------------------------------------
-
                 usage = getattr(
                     response,
                     "usage",
@@ -543,26 +777,13 @@ class CodingAgent:
                     ),
                 )
 
-                # --------------------------------------------
-                # Save assistant message to history
-                # --------------------------------------------
-
                 self.history.add_assistant_message(
                     parsed.assistant_message
                 )
 
-                # Persist immediately.
-                #
-                # Even if execution crashes before tool execution,
-                # the model response itself is already preserved.
                 self._save_session(
                     status="running"
                 )
-
-                # =================================================
-                # No tool calls:
-                # model attempts to finish
-                # =================================================
 
                 if not parsed.tool_calls:
 
@@ -572,10 +793,6 @@ class CodingAgent:
                             self.state
                         )
                     )
-
-                    # ----------------------------------------
-                    # Runtime accepts completion
-                    # ----------------------------------------
 
                     if decision.can_finish:
 
@@ -597,10 +814,6 @@ class CodingAgent:
                         )
 
                         return final_result
-
-                    # ----------------------------------------
-                    # Runtime rejects premature completion
-                    # ----------------------------------------
 
                     print()
 
@@ -629,10 +842,6 @@ class CodingAgent:
 
                     continue
 
-                # =================================================
-                # Execute tool calls
-                # =================================================
-
                 for tool_call in (
                     parsed.tool_calls
                 ):
@@ -640,10 +849,6 @@ class CodingAgent:
                     self._handle_tool_call(
                         tool_call=tool_call
                     )
-
-                # --------------------------------------------
-                # Runtime termination check
-                # --------------------------------------------
 
                 runtime_decision = (
                     self.termination_policy
@@ -661,18 +866,10 @@ class CodingAgent:
                         .feedback
                     )
 
-            # =================================================
-            # Maximum-step termination
-            # =================================================
-
             raise RuntimeError(
                 self.termination_policy
                 .max_steps_error()
             )
-
-        # ====================================================
-        # User interruption
-        # ====================================================
 
         except KeyboardInterrupt:
 
@@ -691,10 +888,6 @@ class CodingAgent:
             )
 
             raise
-
-        # ====================================================
-        # Fatal runtime error
-        # ====================================================
 
         except Exception as exc:
 
@@ -1019,12 +1212,11 @@ class CodingAgent:
 
         metadata = {
             "status": status,
+            # Always write the error field so a resumed/running or
+            # completed session clears a stale error from a previous
+            # failed snapshot.
+            "error": error,
         }
-
-        if error is not None:
-            metadata[
-                "error"
-            ] = error
 
         self.session_store.save_history(
             session_id=(

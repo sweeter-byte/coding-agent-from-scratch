@@ -62,3 +62,24 @@ def test_trace_logger_truncates_large_strings(tmp_path: Path):
     content = record["data"]["content"]
     assert content.startswith("abcde")
     assert "TRUNCATED" in content
+
+
+def test_trace_logger_records_session_resume(tmp_path: Path):
+    logger = TraceLogger(
+        directory=tmp_path / "traces",
+        run_id="resume-run",
+    )
+
+    logger.log_session_resume(
+        restored_step=3,
+        next_step=4,
+        previous_status="failed",
+    )
+
+    record = read_jsonl(logger.get_log_path())[0]
+
+    assert record["event"] == "session_resume"
+    assert record["step"] == 3
+    assert record["data"]["restored_step"] == 3
+    assert record["data"]["next_step"] == 4
+    assert record["data"]["previous_status"] == "failed"

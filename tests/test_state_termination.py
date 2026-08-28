@@ -107,3 +107,63 @@ def test_max_steps_error_contains_limit():
     policy = TerminationPolicy(max_steps=7)
 
     assert "7" in policy.max_steps_error()
+
+
+def test_state_restore_restores_durable_and_transient_fields():
+    state = AgentState()
+
+    state.restore(
+        {
+            "step": 4,
+            "write_version": 3,
+            "validated_version": 2,
+            "total_tool_calls": 8,
+            "consecutive_errors": 2,
+            "last_tool_name": "run_command",
+            "last_error": "boom",
+        }
+    )
+
+    assert state.step == 4
+    assert state.write_version == 3
+    assert state.validated_version == 2
+    assert state.total_tool_calls == 8
+    assert state.consecutive_errors == 2
+    assert state.last_tool_name == "run_command"
+    assert state.last_error == "boom"
+
+
+def test_prepare_for_resume_only_clears_transient_failure_state():
+    state = AgentState(
+        step=4,
+        write_version=3,
+        validated_version=2,
+        total_tool_calls=8,
+        consecutive_errors=4,
+        last_tool_name="run_command",
+        last_error="boom",
+    )
+
+    state.prepare_for_resume()
+
+    assert state.step == 4
+    assert state.write_version == 3
+    assert state.validated_version == 2
+    assert state.total_tool_calls == 8
+    assert state.last_tool_name == "run_command"
+    assert state.consecutive_errors == 0
+    assert state.last_error is None
+
+
+def test_state_restore_rejects_inconsistent_versions():
+    state = AgentState()
+
+    import pytest
+
+    with pytest.raises(ValueError, match="validated_version"):
+        state.restore(
+            {
+                "write_version": 1,
+                "validated_version": 2,
+            }
+        )

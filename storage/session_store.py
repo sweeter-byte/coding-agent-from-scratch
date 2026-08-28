@@ -553,8 +553,10 @@ class SessionStore:
         """
         Return lightweight metadata for stored sessions.
 
-        The full message contents are intentionally omitted so that
-        a future UI can list sessions without loading every message.
+        The full message contents are intentionally omitted. Small
+        metadata and runtime-state summaries are returned so a CLI or
+        future UI can show status and progress without exposing the
+        complete conversation.
         """
 
         sessions: list[dict] = []
@@ -608,6 +610,12 @@ class SessionStore:
                         "metadata": (
                             data.get(
                                 "metadata",
+                                {},
+                            )
+                        ),
+                        "state": (
+                            data.get(
+                                "state",
                                 {},
                             )
                         ),

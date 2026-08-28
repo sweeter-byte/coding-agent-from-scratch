@@ -44,6 +44,91 @@ class AgentState:
 
         self.last_error = None
 
+
+    def restore(
+        self,
+        data: dict,
+    ) -> None:
+        """
+        Restore runtime state from persisted session data.
+
+        Durable progress fields are restored exactly so that a
+        resumed agent continues from the previous execution state.
+        """
+
+        if not isinstance(
+            data,
+            dict,
+        ):
+            raise TypeError(
+                "state data must be a dictionary."
+            )
+
+        self.step = self._restore_int(
+            data=data,
+            key="step",
+            default=0,
+            minimum=0,
+        )
+
+        self.write_version = self._restore_int(
+            data=data,
+            key="write_version",
+            default=0,
+            minimum=0,
+        )
+
+        self.validated_version = self._restore_int(
+            data=data,
+            key="validated_version",
+            default=-1,
+            minimum=-1,
+        )
+
+        self.total_tool_calls = self._restore_int(
+            data=data,
+            key="total_tool_calls",
+            default=0,
+            minimum=0,
+        )
+
+        self.consecutive_errors = self._restore_int(
+            data=data,
+            key="consecutive_errors",
+            default=0,
+            minimum=0,
+        )
+
+        self.last_tool_name = self._restore_optional_string(
+            data=data,
+            key="last_tool_name",
+        )
+
+        self.last_error = self._restore_optional_string(
+            data=data,
+            key="last_error",
+        )
+
+        if self.validated_version > self.write_version:
+            raise ValueError(
+                "validated_version cannot be greater "
+                "than write_version."
+            )
+
+    def prepare_for_resume(
+        self,
+    ) -> None:
+        """
+        Clear transient failure state before resuming a session.
+
+        Durable task progress such as step/write/validation versions
+        is intentionally preserved. A previous burst of errors should
+        not cause the freshly resumed process to stop immediately.
+        """
+
+        self.consecutive_errors = 0
+        self.last_error = None
+
     def begin_step(
         self,
         step: int,
@@ -162,6 +247,63 @@ class AgentState:
     # ========================================================
     # Helpers
     # ========================================================
+
+
+    @staticmethod
+    def _restore_int(
+        data: dict,
+        key: str,
+        default: int,
+        minimum: int,
+    ) -> int:
+        value = data.get(
+            key,
+            default,
+        )
+
+        if (
+            isinstance(
+                value,
+                bool,
+            )
+            or not isinstance(
+                value,
+                int,
+            )
+        ):
+            raise ValueError(
+                f"Invalid persisted state field '{key}'."
+            )
+
+        if value < minimum:
+            raise ValueError(
+                f"Persisted state field '{key}' "
+                f"must be >= {minimum}."
+            )
+
+        return value
+
+    @staticmethod
+    def _restore_optional_string(
+        data: dict,
+        key: str,
+    ) -> str | None:
+        value = data.get(
+            key
+        )
+
+        if value is None:
+            return None
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            raise ValueError(
+                f"Invalid persisted state field '{key}'."
+            )
+
+        return value
 
     @staticmethod
     def _extract_error(
