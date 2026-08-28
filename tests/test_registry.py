@@ -12,9 +12,11 @@ def test_registry_contains_expected_tools(tmp_path: Path):
     registry = ToolRegistry(tmp_path / "workspace")
 
     assert set(registry.list_tools()) == {
+        "list_files",
+        "search_text",
         "read_file",
         "write_file",
-        "list_files",
+        "edit_file",
         "run_command",
     }
 
@@ -32,6 +34,8 @@ def test_get_schemas_returns_defensive_copy(tmp_path: Path):
     }
     assert "mutated" not in names
     assert "read_file" in names
+    assert "search_text" in names
+    assert "edit_file" in names
 
 
 def test_registry_dispatches_tool(tmp_path: Path):
@@ -46,6 +50,42 @@ def test_registry_dispatches_tool(tmp_path: Path):
 
     assert result["ok"] is True
     assert (tmp_path / "workspace" / "a.txt").exists()
+
+
+def test_registry_dispatches_search_and_edit_tools(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    registry = ToolRegistry(root)
+
+    search_result = decode(
+        registry.execute(
+            "search_text",
+            {"query": "value", "file_pattern": "*.py"},
+        )
+    )
+    read_result = decode(
+        registry.execute(
+            "read_file",
+            {"path": "app.py"},
+        )
+    )
+    edit_result = decode(
+        registry.execute(
+            "edit_file",
+            {
+                "path": "app.py",
+                "old_text": "value = 1",
+                "new_text": "value = 2",
+            },
+        )
+    )
+
+    assert search_result["ok"] is True
+    assert search_result["count"] == 1
+    assert read_result["ok"] is True
+    assert edit_result["ok"] is True
+    assert (root / "app.py").read_text(encoding="utf-8") == "value = 2\n"
 
 
 def test_unknown_tool_returns_structured_error(tmp_path: Path):

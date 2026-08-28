@@ -167,3 +167,36 @@ def test_state_restore_rejects_inconsistent_versions():
                 "validated_version": 2,
             }
         )
+
+
+def test_edit_file_marks_latest_source_version_dirty():
+    state = AgentState()
+
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True},
+    )
+    state.record_tool_result(
+        "run_command",
+        {"purpose": "test"},
+        {"ok": True},
+    )
+
+    assert state.latest_version_validated is True
+    assert state.write_version == 1
+    assert state.validated_version == 1
+
+    state.record_tool_result(
+        "edit_file",
+        {
+            "path": "main.py",
+            "old_text": "old",
+            "new_text": "new",
+        },
+        {"ok": True},
+    )
+
+    assert state.write_version == 2
+    assert state.validated_version == 1
+    assert state.latest_version_validated is False

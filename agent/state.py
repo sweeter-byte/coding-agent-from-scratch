@@ -186,7 +186,10 @@ class AgentState:
         # ----------------------------------------------------
 
         if (
-            tool_name == "write_file"
+            tool_name in {
+                "write_file",
+                "edit_file",
+            }
             and ok
         ):
             self.write_version += 1

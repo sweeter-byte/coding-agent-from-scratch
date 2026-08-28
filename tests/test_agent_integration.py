@@ -508,3 +508,129 @@ def test_agent_resume_requires_larger_max_steps_when_limit_reached(
     # A rejected resume must not rewrite the persisted status to running.
     snapshot = store.load(session_id)
     assert snapshot["metadata"]["status"] == "failed"
+
+
+def test_agent_search_read_edit_validate_finish_flow(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    """
+    Exercise the intended existing-project workflow:
+
+        search_text -> read_file -> edit_file -> run_command -> finish
+
+    edit_file must count as a source change, so the runtime may only
+    accept completion after the edited version is validated.
+    """
+
+    source = agent_config.workspace / "app.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "def greet():\n"
+        "    return 'old'\n"
+        "\n"
+        "print(greet())\n",
+        encoding="utf-8",
+    )
+
+    fake_llm = FakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "call-search",
+                        "search_text",
+                        {
+                            "query": "return 'old'",
+                            "file_pattern": "*.py",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "call-read",
+                        "read_file",
+                        {
+                            "path": "app.py",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "call-edit",
+                        "edit_file",
+                        {
+                            "path": "app.py",
+                            "old_text": "    return 'old'",
+                            "new_text": "    return 'new'",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "call-test",
+                        "run_command",
+                        {
+                            "argv": ["python", "app.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+            response(content="Updated and validated app.py."),
+        ]
+    )
+
+    trace_dir = tmp_path / "traces"
+
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=trace_dir,
+            run_id=run_id,
+        ),
+    )
+
+    agent = CodingAgent(config=agent_config)
+    agent.llm_client = fake_llm
+    agent.session_store = SessionStore(tmp_path / "sessions")
+
+    result = agent.run(
+        "Change the existing app.py greeting from old to new and test it"
+    )
+
+    assert result == "Updated and validated app.py."
+    assert source.read_text(encoding="utf-8") == (
+        "def greet():\n"
+        "    return 'new'\n"
+        "\n"
+        "print(greet())\n"
+    )
+
+    assert agent.state.step == 5
+    assert agent.state.total_tool_calls == 4
+    assert agent.state.write_version == 1
+    assert agent.state.validated_version == 1
+    assert agent.state.latest_version_validated is True
+
+    tool_names = set(agent.tool_registry.list_tools())
+    assert "search_text" in tool_names
+    assert "edit_file" in tool_names
+
+    history = agent.history.get_messages()
+    search_result_message = next(
+        message
+        for message in history
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "call-search"
+    )
+    search_result = json.loads(search_result_message["content"])
+    assert search_result["ok"] is True
+    assert search_result["matches"][0]["path"] == "app.py"

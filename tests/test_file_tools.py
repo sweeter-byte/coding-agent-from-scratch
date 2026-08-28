@@ -114,3 +114,252 @@ def test_list_files_respects_max_entries(tmp_path: Path):
     assert result["ok"] is True
     assert result["count"] == 2
     assert result["truncated"] is True
+
+
+# ============================================================
+# search_text
+# ============================================================
+
+
+def test_search_text_returns_path_line_and_text(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+    tools.write_file(
+        "src/app.py",
+        "def greet():\n    return 'hello'\n\nprint(greet())\n",
+    )
+
+    result = decode(
+        tools.search_text("greet", file_pattern="*.py")
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 2
+    assert result["matches"][0] == {
+        "path": "src/app.py",
+        "line": 1,
+        "text": "def greet():",
+    }
+    assert result["matches"][1]["line"] == 4
+
+
+def test_search_text_respects_file_pattern(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+    tools.write_file("a.py", "needle\n")
+    tools.write_file("a.txt", "needle\n")
+
+    result = decode(
+        tools.search_text("needle", file_pattern="*.py")
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["matches"][0]["path"] == "a.py"
+
+
+def test_search_text_can_search_one_file(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+    tools.write_file("a.py", "target\n")
+    tools.write_file("b.py", "target\n")
+
+    result = decode(
+        tools.search_text("target", path="b.py")
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["matches"][0]["path"] == "b.py"
+
+
+def test_search_text_respects_max_results(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+    tools.write_file(
+        "many.txt",
+        "\n".join(["needle"] * 10),
+    )
+
+    result = decode(
+        tools.search_text("needle", max_results=3)
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 3
+    assert result["truncated"] is True
+
+
+def test_search_text_rejects_path_escape(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+
+    result = decode(
+        tools.search_text("secret", path="../")
+    )
+
+    assert result["ok"] is False
+    assert "escapes the workspace" in result["error"]
+
+
+def test_search_text_skips_binary_and_non_utf8_files(tmp_path: Path):
+    root = tmp_path / "workspace"
+    tools = FileTools(root)
+
+    (root / "binary.bin").write_bytes(b"needle\x00data")
+    (root / "bad.bin").write_bytes(b"needle\xff")
+    (root / "good.txt").write_text("needle\n", encoding="utf-8")
+
+    result = decode(
+        tools.search_text("needle")
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["matches"][0]["path"] == "good.txt"
+    assert result["skipped_files"] >= 2
+
+
+def test_search_text_skips_common_cache_directories(tmp_path: Path):
+    root = tmp_path / "workspace"
+    tools = FileTools(root)
+
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("needle\n", encoding="utf-8")
+    (root / "src").mkdir()
+    (root / "src" / "main.py").write_text("needle\n", encoding="utf-8")
+
+    result = decode(
+        tools.search_text("needle")
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["matches"][0]["path"] == "src/main.py"
+
+
+# ============================================================
+# edit_file
+# ============================================================
+
+
+def test_edit_file_requires_read_before_edit(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    tools = FileTools(root)
+
+    result = decode(
+        tools.edit_file(
+            "app.py",
+            "value = 1",
+            "value = 2",
+        )
+    )
+
+    assert result["ok"] is False
+    assert "must be read" in result["error"]
+    assert (root / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_edit_file_replaces_one_unique_match_after_read(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text(
+        "def value():\n    return 1\n",
+        encoding="utf-8",
+    )
+    tools = FileTools(root)
+
+    read_result = decode(tools.read_file("app.py"))
+    edit_result = decode(
+        tools.edit_file(
+            "app.py",
+            "    return 1",
+            "    return 2",
+        )
+    )
+
+    assert read_result["ok"] is True
+    assert edit_result["ok"] is True
+    assert edit_result["replacements"] == 1
+    assert target.read_text(encoding="utf-8") == "def value():\n    return 2\n"
+
+
+def test_edit_file_rejects_missing_old_text(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    tools = FileTools(root)
+    tools.read_file("app.py")
+
+    result = decode(
+        tools.edit_file(
+            "app.py",
+            "value = 999",
+            "value = 2",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["match_count"] == 0
+    assert "not found" in result["error"]
+
+
+def test_edit_file_rejects_ambiguous_old_text(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "app.py").write_text(
+        "value = 1\nvalue = 1\n",
+        encoding="utf-8",
+    )
+    tools = FileTools(root)
+    tools.read_file("app.py")
+
+    result = decode(
+        tools.edit_file(
+            "app.py",
+            "value = 1",
+            "value = 2",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["match_count"] == 2
+    assert "multiple locations" in result["error"]
+
+
+def test_edit_file_rejects_path_escape(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("value = 1\n", encoding="utf-8")
+    tools = FileTools(root)
+
+    result = decode(
+        tools.edit_file(
+            "../outside.py",
+            "value = 1",
+            "value = 2",
+        )
+    )
+
+    assert result["ok"] is False
+    assert "escapes the workspace" in result["error"]
+    assert outside.read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_edit_file_allows_deletion_with_empty_new_text(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("keep\nremove\n", encoding="utf-8")
+    tools = FileTools(root)
+    tools.read_file("app.py")
+
+    result = decode(
+        tools.edit_file(
+            "app.py",
+            "remove\n",
+            "",
+        )
+    )
+
+    assert result["ok"] is True
+    assert target.read_text(encoding="utf-8") == "keep\n"

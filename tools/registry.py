@@ -11,9 +11,11 @@ from .command_tools import CommandTools
 from .file_tools import FileTools
 
 from .schemas import (
+    EDIT_FILE_SCHEMA,
     LIST_FILES_SCHEMA,
     READ_FILE_SCHEMA,
     RUN_COMMAND_SCHEMA,
+    SEARCH_TEXT_SCHEMA,
     WRITE_FILE_SCHEMA,
 )
 
@@ -88,6 +90,16 @@ class ToolRegistry:
         # ----------------------------------------------------
 
         self._register(
+            LIST_FILES_SCHEMA,
+            self.file_tools.list_files,
+        )
+
+        self._register(
+            SEARCH_TEXT_SCHEMA,
+            self.file_tools.search_text,
+        )
+
+        self._register(
             READ_FILE_SCHEMA,
             self.file_tools.read_file,
         )
@@ -98,8 +110,8 @@ class ToolRegistry:
         )
 
         self._register(
-            LIST_FILES_SCHEMA,
-            self.file_tools.list_files,
+            EDIT_FILE_SCHEMA,
+            self.file_tools.edit_file,
         )
 
         self._register(
