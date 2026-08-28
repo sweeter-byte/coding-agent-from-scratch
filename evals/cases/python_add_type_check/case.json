@@ -1,0 +1,10 @@
+{
+  "name": "python_add_type_check",
+  "task": "请找到 calculator.py 的 add 函数，为它增加严格的 int 输入检查：任一参数不是 int 时抛出 TypeError，并在现有测试文件中补充对应测试。修改完成后运行 pytest 验证，不要重写整个文件。",
+  "max_steps": 12,
+  "tags": ["python", "edit", "tests"],
+  "acceptance": {
+    "argv": ["{python}", "{case_dir}/oracle.py", "{workspace}"],
+    "timeout_seconds": 15
+  }
+}

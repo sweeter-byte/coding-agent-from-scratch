@@ -1,0 +1,10 @@
+{
+  "name": "python_implement_unique",
+  "task": "实现 collections_utils.py 中的 unique_preserve_order(items)：去除重复元素但保持首次出现顺序。不要修改函数名；补充或完善测试后运行 pytest 验证。",
+  "max_steps": 12,
+  "tags": ["python", "feature", "tests"],
+  "acceptance": {
+    "argv": ["{python}", "{case_dir}/oracle.py", "{workspace}"],
+    "timeout_seconds": 15
+  }
+}

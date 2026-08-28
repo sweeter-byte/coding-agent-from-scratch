@@ -1,0 +1,10 @@
+{
+  "name": "cpp_fix_compile",
+  "task": "修复 main.cpp 中导致编译失败的错误，使程序正确输出正数元素之和。请使用 g++ 编译并运行程序验证，尽量只做必要修改。",
+  "max_steps": 12,
+  "tags": ["cpp", "compile", "bugfix"],
+  "acceptance": {
+    "argv": ["{python}", "{case_dir}/oracle.py", "{workspace}"],
+    "timeout_seconds": 20
+  }
+}

@@ -102,7 +102,7 @@ python -m pytest -q
 当前测试集：
 
 ```text
-150 passed
+161 passed
 ```
 
 ## Project Structure
@@ -115,6 +115,7 @@ coding-agent-from-scratch/
 ├── security/    # 敏感路径策略与凭据脱敏
 ├── prompts/     # System Prompt
 ├── tests/       # 单元测试与集成测试
+├── evals/       # 端到端 Coding Agent 评测与独立验收
 ├── workspace/   # 默认工作目录
 └── main.py      # CLI 入口
 ```
@@ -136,3 +137,17 @@ Agent 默认只能操作指定 Workspace，并提供：
 - 敏感环境变量清理
 - `.env` / 私钥 / 云凭据等敏感路径拦截
 - Tool Result、Session、Trace 中的敏感文本脱敏
+
+## Evaluation Harness
+
+除 Runtime 单元测试和集成测试外，项目提供独立的端到端 Coding Agent 评测：
+
+```bash
+python -m evals.runner --list-cases
+python -m evals.runner --case python_add_type_check
+python -m evals.runner
+```
+
+每个评测 case 由三部分组成：暴露给 Agent 的初始 `project/`、自然语言任务，以及独立的 `oracle.py`。Harness 只把 `project/` 复制进评测 Workspace，不把 oracle 写入任务提示；Agent 结束后 Harness 再单独执行 oracle。只有 **Agent 正常完成且独立验收通过** 才计为 PASS。这里的隔离是评测数据流隔离，不宣称提供 OS 级安全沙箱。
+
+当前内置 5 个小型 case，覆盖 Python 局部修改、bug 修复、功能实现、边界条件和 C++ 编译修复。评测报告记录成功率、Agent steps、tool calls、validation attempts、模型 token 用量、耗时以及对应 trace，并写入 `evals/results/`（该目录不入库）。真实评测会调用配置的模型 API，因此与 `python -m pytest` 的本地 Runtime 测试分开执行。

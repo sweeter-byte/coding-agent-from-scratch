@@ -1,0 +1,10 @@
+{
+  "name": "python_fix_clamp",
+  "task": "修复 utils.py 中 clamp 函数的边界逻辑，使其把 value 限制在 [lower, upper] 范围内，并确保现有测试通过。请保持函数签名不变并运行 pytest 验证。",
+  "max_steps": 10,
+  "tags": ["python", "bugfix"],
+  "acceptance": {
+    "argv": ["{python}", "{case_dir}/oracle.py", "{workspace}"],
+    "timeout_seconds": 15
+  }
+}

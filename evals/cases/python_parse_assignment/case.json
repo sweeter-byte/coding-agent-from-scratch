@@ -1,0 +1,10 @@
+{
+  "name": "python_parse_assignment",
+  "task": "修复 parser.py 中 parse_assignment(line) 的解析问题：输入格式为 key=value，value 本身允许继续包含 '='。函数应只按第一个 '=' 分割，并对 key/value 两侧空白执行 strip。保持无 '=' 时抛出 ValueError，并运行 pytest 验证。",
+  "max_steps": 12,
+  "tags": ["python", "bugfix", "edge-case"],
+  "acceptance": {
+    "argv": ["{python}", "{case_dir}/oracle.py", "{workspace}"],
+    "timeout_seconds": 15
+  }
+}
