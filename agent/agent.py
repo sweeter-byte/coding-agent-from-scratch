@@ -1160,6 +1160,13 @@ class CodingAgent:
         # Local tool execution
         # ----------------------------------------------------
 
+        workspace_revision_before = None
+
+        if tool_name == "run_command":
+            workspace_revision_before = (
+                self._calculate_workspace_revision()
+            )
+
         tool_start = (
             perf_counter()
         )
@@ -1248,6 +1255,26 @@ class CodingAgent:
             workspace_revision=(
                 workspace_revision
             ),
+            workspace_revision_before=(
+                workspace_revision_before
+            ),
+        )
+
+        if (
+            tool_name == "run_command"
+            and result_data.get("ok") is True
+            and result_data.get("validation_eligible") is True
+            and result_data.get("workspace_revision_stable") is False
+        ):
+            result_data["validation_note"] = (
+                "Command succeeded, but the workspace changed during "
+                "execution. This run did not create validation evidence; "
+                "validate the new workspace revision again."
+            )
+
+        tool_result = json.dumps(
+            self.sensitive_data_policy.redact_data(result_data),
+            ensure_ascii=False,
         )
 
         if (

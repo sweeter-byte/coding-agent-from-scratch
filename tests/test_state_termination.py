@@ -16,14 +16,14 @@ def test_state_tracks_write_and_validation_versions():
     state.record_tool_result(
         "run_command",
         {"purpose": "compile"},
-        {"ok": True},
+        {"ok": True, "purpose": "compile", "validation_eligible": False},
     )
     assert state.latest_version_validated is False
 
     state.record_tool_result(
         "run_command",
         {"purpose": "test"},
-        {"ok": True},
+        {"ok": True, "purpose": "test", "validation_eligible": True},
     )
     assert state.validated_version == 1
     assert state.latest_version_validated is True
@@ -180,7 +180,7 @@ def test_edit_file_marks_latest_source_version_dirty():
     state.record_tool_result(
         "run_command",
         {"purpose": "test"},
-        {"ok": True},
+        {"ok": True, "purpose": "test", "validation_eligible": True},
     )
 
     assert state.latest_version_validated is True
@@ -221,9 +221,13 @@ def test_state_binds_validation_to_workspace_revision():
         },
         {
             "ok": True,
+            "purpose": "run",
+            "argv": ["python", "main.py"],
+            "validation_eligible": True,
             "returncode": 0,
         },
         workspace_revision="revision-a",
+        workspace_revision_before="revision-a",
     )
 
     assert state.current_revision == "revision-a"
@@ -234,7 +238,7 @@ def test_state_binds_validation_to_workspace_revision():
     record = state.validation_records[0]
     assert record.revision == "revision-a"
     assert record.argv == ["python", "main.py"]
-    assert record.purpose == "test"
+    assert record.purpose == "run"
     assert record.returncode == 0
     assert record.step == 2
 
@@ -266,8 +270,15 @@ def test_failed_command_can_dirty_previously_validated_workspace():
             "argv": ["python", "main.py"],
             "purpose": "test",
         },
-        {"ok": True, "returncode": 0},
+        {
+            "ok": True,
+            "purpose": "run",
+            "argv": ["python", "main.py"],
+            "validation_eligible": True,
+            "returncode": 0,
+        },
         workspace_revision="revision-a",
+        workspace_revision_before="revision-a",
     )
 
     assert state.latest_version_validated is True
@@ -289,6 +300,38 @@ def test_failed_command_can_dirty_previously_validated_workspace():
     assert state.current_revision == "revision-b"
     assert state.validated_revision == "revision-a"
     assert state.workspace_changed_after_validation is True
+    assert state.latest_version_validated is False
+
+
+
+def test_successful_command_that_changes_workspace_does_not_validate_new_revision():
+    state = AgentState()
+    state.begin_step(1)
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True, "path": "main.py"},
+        workspace_revision="revision-a",
+    )
+
+    state.begin_step(2)
+    state.record_tool_result(
+        "run_command",
+        {"argv": ["python", "mutate.py"], "purpose": "run"},
+        {
+            "ok": True,
+            "purpose": "run",
+            "argv": ["python", "mutate.py"],
+            "validation_eligible": True,
+            "returncode": 0,
+        },
+        workspace_revision_before="revision-a",
+        workspace_revision="revision-b",
+    )
+
+    assert state.current_revision == "revision-b"
+    assert state.validated_revision is None
+    assert state.validation_records == []
     assert state.latest_version_validated is False
 
 
@@ -386,8 +429,15 @@ def test_state_successful_validation_updates_working_memory_evidence():
             "argv": ["python", "main.py"],
             "purpose": "test",
         },
-        {"ok": True, "returncode": 0},
+        {
+            "ok": True,
+            "purpose": "run",
+            "argv": ["python", "main.py"],
+            "validation_eligible": True,
+            "returncode": 0,
+        },
         workspace_revision="revision-a",
+        workspace_revision_before="revision-a",
     )
 
     memory = state.working_memory

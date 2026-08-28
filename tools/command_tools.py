@@ -6,6 +6,8 @@ import subprocess
 
 from pathlib import Path
 
+from security import SensitiveDataPolicy
+
 from .workspace import WorkspaceManager
 
 
@@ -206,6 +208,9 @@ class CommandTools:
         """
 
         normalized_cwd = cwd
+        runtime_purpose = purpose
+        validation_eligible = False
+        validation_reason = "command_not_executed"
 
         try:
             self._validate_request(
@@ -225,6 +230,15 @@ class CommandTools:
             command = self._prepare_command(
                 argv=argv,
                 cwd_path=cwd_path,
+            )
+
+            runtime_purpose = self._infer_command_purpose(argv)
+            (
+                validation_eligible,
+                validation_reason,
+            ) = self._validation_eligibility(
+                argv=argv,
+                purpose=runtime_purpose,
             )
 
             timeout_seconds = max(
@@ -256,7 +270,9 @@ class CommandTools:
             return self._json(
                 {
                     "ok": result.returncode == 0,
-                    "purpose": purpose,
+                    "purpose": runtime_purpose,
+                    "validation_eligible": validation_eligible,
+                    "validation_reason": validation_reason,
                     "argv": argv,
                     "cwd": normalized_cwd,
                     "returncode": result.returncode,
@@ -278,7 +294,9 @@ class CommandTools:
             return self._json(
                 {
                     "ok": False,
-                    "purpose": purpose,
+                    "purpose": runtime_purpose,
+                    "validation_eligible": validation_eligible,
+                    "validation_reason": validation_reason,
                     "argv": argv,
                     "cwd": normalized_cwd,
                     "returncode": None,
@@ -298,7 +316,9 @@ class CommandTools:
             return self._json(
                 {
                     "ok": False,
-                    "purpose": purpose,
+                    "purpose": runtime_purpose,
+                    "validation_eligible": validation_eligible,
+                    "validation_reason": validation_reason,
                     "argv": argv,
                     "cwd": normalized_cwd,
                     "returncode": None,
@@ -365,6 +385,14 @@ class CommandTools:
                 + ", ".join(sorted(self.ALLOWED_PURPOSES))
             )
 
+        expected_purpose = self._infer_command_purpose(argv)
+
+        if purpose != expected_purpose:
+            raise ValueError(
+                "purpose does not match the command type: "
+                f"expected '{expected_purpose}' for {argv[0]!r}."
+            )
+
         if not isinstance(stdin, str):
             raise TypeError(
                 "stdin must be a string."
@@ -397,6 +425,88 @@ class CommandTools:
             raise ValueError(
                 "cwd cannot be empty."
             )
+
+    # ========================================================
+    # Runtime-owned command semantics
+    # ========================================================
+
+    def _infer_command_purpose(
+        self,
+        argv: list[str],
+    ) -> str:
+        """Infer compile/run/test from argv instead of trusting the model."""
+
+        executable = argv[0]
+
+        if (
+            executable in self.COMPILERS
+            or executable in self.CMAKE_EXECUTABLES
+        ):
+            return "compile"
+
+        if (
+            executable in self.PYTEST_EXECUTABLES
+            or executable in self.CTEST_EXECUTABLES
+        ):
+            return "test"
+
+        if executable in self.PYTHON_EXECUTABLES:
+            index = 1
+            while index < len(argv) and argv[index] in self.PYTHON_FLAGS:
+                index += 1
+
+            if (
+                index + 1 < len(argv)
+                and argv[index] == "-m"
+                and argv[index + 1] == "pytest"
+            ):
+                return "test"
+
+            return "run"
+
+        return "run"
+
+    def _validation_eligibility(
+        self,
+        argv: list[str],
+        purpose: str,
+    ) -> tuple[bool, str]:
+        """
+        Return whether a successful command may create validation evidence.
+        """
+
+        if purpose == "compile":
+            return False, "compile_only"
+
+        if purpose == "test" and self._is_pytest_command(argv):
+            if "--collect-only" in argv:
+                return False, "pytest_collect_only"
+
+        if purpose == "test" and argv[0] in self.CTEST_EXECUTABLES:
+            if "-N" in argv or "--show-only" in argv:
+                return False, "ctest_list_only"
+
+        return True, "eligible"
+
+    def _is_pytest_command(
+        self,
+        argv: list[str],
+    ) -> bool:
+        if argv[0] in self.PYTEST_EXECUTABLES:
+            return True
+
+        if argv[0] not in self.PYTHON_EXECUTABLES:
+            return False
+
+        index = 1
+        while index < len(argv) and argv[index] in self.PYTHON_FLAGS:
+            index += 1
+
+        return (
+            index + 1 < len(argv)
+            and argv[index] == "-m"
+            and argv[index + 1] == "pytest"
+        )
 
     # ========================================================
     # Command preparation
@@ -977,29 +1087,11 @@ class CommandTools:
         API credentials from the agent process.
         """
 
-        environment = dict(os.environ)
-
-        explicit_sensitive = {
-            "QWEN_API_KEY",
-            "DASHSCOPE_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if not SensitiveDataPolicy.is_sensitive_env_key(key)
         }
-
-        for key in list(environment):
-            upper = key.upper()
-
-            if (
-                upper in explicit_sensitive
-                or upper.endswith("_API_KEY")
-                or upper.endswith("_ACCESS_TOKEN")
-                or upper.endswith("_REFRESH_TOKEN")
-                or upper.endswith("_SECRET")
-                or upper.endswith("_PASSWORD")
-            ):
-                environment.pop(key, None)
-
-        return environment
 
     # ========================================================
     # Output helpers

@@ -280,9 +280,10 @@ RUN_COMMAND_SCHEMA = {
                         "test",
                     ],
                     "description": (
-                        "Why this command is being executed. Use "
-                        "compile for compilation/build steps, run for "
-                        "executing a program, and test for validation."
+                        "Command category. It must match the argv: use "
+                        "compile for compiler/CMake commands, run for "
+                        "Python scripts or workspace executables, and test "
+                        "for pytest/CTest. Runtime rejects mismatches."
                     ),
                 },
                 "stdin": {

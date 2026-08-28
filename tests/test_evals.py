@@ -114,10 +114,14 @@ def test_acceptance_expands_placeholders_and_passes(tmp_path: Path):
 
 def test_acceptance_strips_secret_environment_variables(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("QWEN_API_KEY", "definitely-not-real")
+    monkeypatch.setenv("GITHUB_TOKEN", "definitely-not-real")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKE")
     oracle = (
         "import os, sys\n"
         "from pathlib import Path\n"
         "assert 'QWEN_API_KEY' not in os.environ\n"
+        "assert 'GITHUB_TOKEN' not in os.environ\n"
+        "assert 'AWS_ACCESS_KEY_ID' not in os.environ\n"
         "workspace = Path(sys.argv[1])\n"
         "assert workspace.is_dir()\n"
     )

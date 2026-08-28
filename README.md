@@ -43,7 +43,7 @@ fix
 finish
 ```
 
-Agent 修改代码后不能直接结束。Runtime 会为 Workspace 计算确定性的 SHA-256 revision，并把成功的运行 / 测试记录为 Validation Evidence。只有当前 revision 与最近一次成功验证的 revision 完全一致时才允许完成任务；如果验证后文件被再次修改，即使修改来自 Agent 外部，也必须重新验证。
+Agent 修改代码后不能直接结束。Runtime 会为 Workspace 计算确定性的 SHA-256 revision；命令类别和验证资格由 Runtime 根据 argv 判定，而不是信任模型声明。只有具备验证资格的运行 / 测试命令成功，且命令执行前后的 Workspace revision 完全一致时，才会生成 Validation Evidence。验证后或验证过程中只要 tracked 文件发生变化，都必须对新 revision 重新验证。
 
 上下文管理同时维护三个不同层次：Conversation History 保存完整事件历史；Structured Working Memory 根据真实 Tool Result 自动记录已检查/修改文件、最近命令、错误与验证状态；ContextManager 则把 System Prompt、原始任务、Working Memory 和最近消息组合成下一次实际发送给模型的上下文。Working Memory 不由 LLM 自行总结，因此不会把模型的自述当作运行时事实。
 
@@ -102,7 +102,7 @@ python -m pytest -q
 当前测试集：
 
 ```text
-161 passed
+168 passed
 ```
 
 ## Project Structure
@@ -126,7 +126,7 @@ coding-agent-from-scratch/
 
 ## Safety
 
-Agent 默认只能操作指定 Workspace，并提供：
+文件工具严格限制在指定 Workspace；命令执行采用受控 argv、命令白名单和环境变量清理，但当前 Runtime 不提供 OS 级 Sandbox。主要保护包括：
 
 - 路径越界检查
 - symlink 越界保护

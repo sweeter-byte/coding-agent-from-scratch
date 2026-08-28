@@ -125,8 +125,8 @@ class TerminationPolicy:
                 feedback=(
                     "The workspace changed after the last "
                     "successful validation. Previous validation "
-                    "evidence is stale. Re-run the appropriate "
-                    "command with purpose='run' or purpose='test' "
+                    "evidence is stale. Re-run an eligible program or "
+                    "test command against the unchanged current revision "
                     "before finishing."
                 ),
             )
@@ -145,8 +145,9 @@ class TerminationPolicy:
                 feedback=(
                     "The latest source-code version has not passed "
                     "successful runtime validation for the current "
-                    "workspace revision. Continue using run_command "
-                    "with purpose='run' or purpose='test'."
+                    "workspace revision. Continue using an eligible "
+                    "run_command. Collection/list-only test commands do "
+                    "not create validation evidence."
                 ),
             )
 

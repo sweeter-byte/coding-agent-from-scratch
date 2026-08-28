@@ -257,14 +257,16 @@ class AgentState:
         arguments: dict,
         result: dict,
         workspace_revision: str | None = None,
+        workspace_revision_before: str | None = None,
     ) -> None:
         """
         Update runtime state after one local tool execution.
 
         workspace_revision should be the post-execution fingerprint for
-        tools that may change workspace contents. Recording the revision
-        even after a failed command lets the runtime detect partial file
-        changes caused before that command returned a non-zero status.
+        tools that may change workspace contents. workspace_revision_before
+        is captured immediately before run_command. A successful command
+        creates validation evidence only when the Runtime marks it eligible
+        and the pre/post workspace revisions are identical.
         """
 
         self.total_tool_calls += 1
@@ -316,40 +318,41 @@ class AgentState:
         # Runtime validation
         # ----------------------------------------------------
 
-        if (
-            tool_name == "run_command"
-            and ok
-        ):
-            purpose = arguments.get(
-                "purpose"
+        if tool_name == "run_command":
+            revision_stable = self._validation_revision_stable(
+                before=workspace_revision_before,
+                after=workspace_revision,
+            )
+            result["workspace_revision_stable"] = revision_stable
+
+            validation_eligible = (
+                result.get("validation_eligible") is True
             )
 
-            if purpose in {
-                "run",
-                "test",
-            }:
-                self.validated_version = (
-                    self.write_version
-                )
+            if ok and validation_eligible and revision_stable:
+                purpose = result.get("purpose")
 
-                if workspace_revision is not None:
-                    self.validated_revision = (
-                        workspace_revision
-                    )
+                if purpose in {"run", "test"}:
+                    self.validated_version = self.write_version
 
-                    self.validation_records.append(
-                        ValidationRecord(
-                            revision=workspace_revision,
-                            argv=self._normalize_argv(
-                                arguments.get("argv")
-                            ),
-                            purpose=purpose,
-                            returncode=self._normalize_returncode(
-                                result.get("returncode")
-                            ),
-                            step=self.step,
+                    if workspace_revision is not None:
+                        self.validated_revision = workspace_revision
+                        self.validation_records.append(
+                            ValidationRecord(
+                                revision=workspace_revision,
+                                argv=self._normalize_argv(
+                                    result.get(
+                                        "argv",
+                                        arguments.get("argv"),
+                                    )
+                                ),
+                                purpose=purpose,
+                                returncode=self._normalize_returncode(
+                                    result.get("returncode")
+                                ),
+                                step=self.step,
+                            )
                         )
-                    )
 
         # ----------------------------------------------------
         # Structured working memory
@@ -365,6 +368,21 @@ class AgentState:
         self.working_memory.sync_revisions(
             current_revision=self.current_revision,
             validated_revision=self.validated_revision,
+        )
+
+    @staticmethod
+    def _validation_revision_stable(
+        before: str | None,
+        after: str | None,
+    ) -> bool:
+        # Direct unit-level state usage may omit revision tracking entirely.
+        if before is None and after is None:
+            return True
+
+        return (
+            before is not None
+            and after is not None
+            and before == after
         )
 
     # ========================================================

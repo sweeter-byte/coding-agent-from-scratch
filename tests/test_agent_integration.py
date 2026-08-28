@@ -77,7 +77,7 @@ def test_agent_write_guard_validate_finish_flow(
                         "run_command",
                         {
                             "argv": ["python", "hello.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -184,7 +184,7 @@ def test_agent_recovers_from_invalid_tool_json(
                         "run_command",
                         {
                             "argv": ["python", "ok.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -278,7 +278,7 @@ def test_agent_can_resume_failed_session_and_continue_same_runtime(
                         "run_command",
                         {
                             "argv": ["python", "missing.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -321,7 +321,7 @@ def test_agent_can_resume_failed_session_and_continue_same_runtime(
                         "run_command",
                         {
                             "argv": ["python", "resume_demo.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -364,7 +364,7 @@ def test_agent_can_resume_failed_session_and_continue_same_runtime(
     )
     assert "resume_demo.py" in resumed_memory["content"]
     assert "python missing.py" in resumed_memory["content"]
-    assert "Validation status: failed" in resumed_memory["content"]
+    assert "Validation status: not_validated" in resumed_memory["content"]
 
     completed_snapshot = resumed_agent.session_store.load(session_id)
     assert completed_snapshot["metadata"]["status"] == "completed"
@@ -591,7 +591,7 @@ def test_agent_search_read_edit_validate_finish_flow(
                         "run_command",
                         {
                             "argv": ["python", "app.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -844,7 +844,7 @@ def test_agent_rejects_finish_after_external_workspace_change(
                         "run_command",
                         {
                             "argv": ["python", "revision_demo.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -857,7 +857,7 @@ def test_agent_rejects_finish_after_external_workspace_change(
                         "run_command",
                         {
                             "argv": ["python", "revision_demo.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -909,6 +909,110 @@ def test_agent_rejects_finish_after_external_workspace_change(
     assert len(stored["state"]["validation_records"]) == 2
 
 
+
+def test_agent_does_not_validate_revision_created_during_command_execution(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    fake_llm = FakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "write-app",
+                        "write_file",
+                        {
+                            "path": "app.py",
+                            "content": "print('original')\n",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "write-mutator",
+                        "write_file",
+                        {
+                            "path": "mutate.py",
+                            "content": (
+                                "from pathlib import Path\n"
+                                "Path('app.py').write_text(\"print('mutated')\\n\", encoding='utf-8')\n"
+                            ),
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "run-mutator",
+                        "run_command",
+                        {
+                            "argv": ["python", "mutate.py"],
+                            "purpose": "run",
+                        },
+                    )
+                ]
+            ),
+            response(content="Finish after mutating run."),
+            response(
+                calls=[
+                    tool_call(
+                        "run-final",
+                        "run_command",
+                        {
+                            "argv": ["python", "app.py"],
+                            "purpose": "run",
+                        },
+                    )
+                ]
+            ),
+            response(content="Finish after stable validation."),
+        ]
+    )
+
+    trace_dir = tmp_path / "traces"
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=trace_dir,
+            run_id=run_id,
+        ),
+    )
+
+    agent = CodingAgent(config=agent_config)
+    agent.llm_client = fake_llm
+    agent.session_store = SessionStore(tmp_path / "sessions")
+
+    result = agent.run("Create app.py and validate its final contents")
+
+    assert result == "Finish after stable validation."
+    assert agent.state.latest_version_validated is True
+    assert len(agent.state.validation_records) == 1
+
+    mutator_result_message = next(
+        message
+        for message in fake_llm.calls[3]["messages"]
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "run-mutator"
+    )
+    mutator_result = json.loads(mutator_result_message["content"])
+    assert mutator_result["ok"] is True
+    assert mutator_result["validation_eligible"] is True
+    assert mutator_result["workspace_revision_stable"] is False
+    assert "did not create validation evidence" in mutator_result["validation_note"]
+
+    guard_context = fake_llm.calls[4]["messages"]
+    assert any(
+        message.get("role") == "user"
+        and "has not passed successful runtime validation"
+        in message.get("content", "").lower()
+        for message in guard_context
+    )
+
+
 def test_resume_detects_workspace_change_and_requires_revalidation(
     monkeypatch,
     tmp_path: Path,
@@ -956,7 +1060,7 @@ def test_resume_detects_workspace_change_and_requires_revalidation(
                         "run_command",
                         {
                             "argv": ["python", "resume_revision.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -984,7 +1088,7 @@ def test_resume_detects_workspace_change_and_requires_revalidation(
                         "run_command",
                         {
                             "argv": ["python", "resume_revision.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]
@@ -1051,7 +1155,7 @@ def test_agent_injects_structured_working_memory_into_each_model_context(
                         "run_command",
                         {
                             "argv": ["python", "memory_demo.py"],
-                            "purpose": "test",
+                            "purpose": "run",
                         },
                     )
                 ]

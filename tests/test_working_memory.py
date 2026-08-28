@@ -89,6 +89,8 @@ def test_working_memory_tracks_failed_command_and_error():
         },
         result={
             "ok": False,
+            "purpose": "test",
+            "validation_eligible": True,
             "returncode": 1,
             "stderr": "AssertionError: boom",
         },
@@ -187,3 +189,26 @@ def test_working_memory_context_message_is_compact_runtime_fact_summary():
     assert "Validation status: passed" in message["content"]
     assert "abcdef123456" in message["content"]
     assert "python -m pytest -q" in message["content"]
+
+
+def test_working_memory_does_not_treat_discovery_only_test_as_validation():
+    memory = WorkingMemory()
+
+    memory.record_tool_result(
+        tool_name="run_command",
+        arguments={
+            "argv": ["python", "-m", "pytest", "--collect-only"],
+            "purpose": "test",
+        },
+        result={
+            "ok": True,
+            "purpose": "test",
+            "validation_eligible": False,
+            "validation_reason": "pytest_collect_only",
+            "returncode": 0,
+        },
+        step=1,
+    )
+
+    assert memory.last_validation is None
+    assert memory.validation_status == "not_validated"

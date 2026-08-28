@@ -248,7 +248,10 @@ class WorkingMemory:
                     arguments.get("argv")
                 ),
                 purpose=self._normalize_purpose(
-                    arguments.get("purpose")
+                    result.get(
+                        "purpose",
+                        arguments.get("purpose"),
+                    )
                 ),
                 ok=ok,
                 returncode=self._normalize_returncode(
@@ -272,11 +275,14 @@ class WorkingMemory:
             else:
                 self.last_failed_command = summary
 
-            if summary.purpose in {
-                "run",
-                "test",
-            }:
-                self.last_validation = summary
+            if result.get("validation_eligible") is True:
+                revision_stable = result.get(
+                    "workspace_revision_stable",
+                    True,
+                )
+
+                if not ok or revision_stable is True:
+                    self.last_validation = summary
 
     def sync_revisions(
         self,

@@ -39,6 +39,29 @@ class SensitiveDataPolicy:
         "private_key",
     }
 
+    SENSITIVE_ENV_EXACT_KEYS = {
+        "API_KEY",
+        "ACCESS_KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PRIVATE_KEY",
+    }
+
+    SENSITIVE_ENV_SUFFIXES = (
+        "_API_KEY",
+        "_ACCESS_KEY",
+        "_ACCESS_KEY_ID",
+        "_SECRET_ACCESS_KEY",
+        "_SECRET_KEY",
+        "_SECRET",
+        "_ACCESS_TOKEN",
+        "_REFRESH_TOKEN",
+        "_TOKEN",
+        "_PASSWORD",
+        "_PRIVATE_KEY",
+    )
+
     SENSITIVE_DIRECTORY_NAMES = {
         ".ssh",
         ".aws",
@@ -92,7 +115,8 @@ class SensitiveDataPolicy:
     _ENV_ASSIGNMENT_PATTERN = re.compile(
         r"(?im)"
         r"(?P<prefix>\b[A-Z][A-Z0-9_]*"
-        r"(?:API_KEY|ACCESS_TOKEN|REFRESH_TOKEN|PASSWORD|PASSWD|SECRET|TOKEN)"
+        r"(?:API_KEY|ACCESS_KEY(?:_ID)?|SECRET_ACCESS_KEY|ACCESS_TOKEN|"
+        r"REFRESH_TOKEN|PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE_KEY)"
         r"=)"
         r"(?P<quote>[\"']?)"
         r"(?P<value>[A-Za-z0-9._~+/=-]{4,})"
@@ -138,6 +162,29 @@ class SensitiveDataPolicy:
                 return True
 
         return False
+
+    @classmethod
+    def is_sensitive_env_key(
+        cls,
+        key: str,
+    ) -> bool:
+        """Return whether an environment-variable name may hold credentials."""
+
+        if not isinstance(key, str):
+            return False
+
+        normalized = key.strip().upper()
+
+        if not normalized:
+            return False
+
+        if normalized in cls.SENSITIVE_ENV_EXACT_KEYS:
+            return True
+
+        return any(
+            normalized.endswith(suffix)
+            for suffix in cls.SENSITIVE_ENV_SUFFIXES
+        )
 
     # ========================================================
     # Path policy

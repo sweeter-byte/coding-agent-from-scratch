@@ -25,7 +25,7 @@ def test_run_python_script_success(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "hello.py"],
-            purpose="test",
+            purpose="run",
         )
     )
 
@@ -34,6 +34,8 @@ def test_run_python_script_success(tmp_path: Path):
     assert result["timed_out"] is False
     assert result["cwd"] == "."
     assert result["stdout"].strip() == "hello"
+    assert result["purpose"] == "run"
+    assert result["validation_eligible"] is True
 
 
 def test_run_python_script_from_workspace_subdirectory(tmp_path: Path):
@@ -44,7 +46,7 @@ def test_run_python_script_from_workspace_subdirectory(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "hello.py"],
-            purpose="test",
+            purpose="run",
             cwd="backend",
         )
     )
@@ -63,7 +65,7 @@ def test_rejects_cwd_escape(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "hello.py"],
-            purpose="test",
+            purpose="run",
             cwd="../outside",
         )
     )
@@ -80,7 +82,7 @@ def test_rejects_absolute_cwd(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "hello.py"],
-            purpose="test",
+            purpose="run",
             cwd=str(tmp_path),
         )
     )
@@ -97,7 +99,7 @@ def test_nonzero_exit_is_reported_as_failure(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "fail.py"],
-            purpose="test",
+            purpose="run",
         )
     )
 
@@ -237,6 +239,44 @@ def test_rejects_unsupported_pytest_option(tmp_path: Path):
     assert "Unsupported pytest option" in result["error"]
 
 
+
+def test_rejects_purpose_that_does_not_match_command_type(tmp_path: Path):
+    root = tmp_path / "workspace"
+    write_script(root, "hello.py", "print('hello')\n")
+    tools = CommandTools(root)
+
+    result = decode(
+        tools.run_command(
+            ["python", "hello.py"],
+            purpose="test",
+        )
+    )
+
+    assert result["ok"] is False
+    assert "purpose does not match the command type" in result["error"]
+
+
+def test_pytest_collect_only_is_not_validation_eligible(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "test_sample.py").write_text(
+        "def test_ok():\n    assert True\n",
+        encoding="utf-8",
+    )
+    tools = CommandTools(root)
+
+    result = decode(
+        tools.run_command(
+            ["python", "-m", "pytest", "--collect-only", "-q"],
+            purpose="test",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["validation_eligible"] is False
+    assert result["validation_reason"] == "pytest_collect_only"
+
+
 def test_rejects_invalid_purpose(tmp_path: Path):
     root = tmp_path / "workspace"
     write_script(root, "hello.py", "print('hello')\n")
@@ -315,7 +355,7 @@ def test_command_timeout(tmp_path: Path):
     result = decode(
         tools.run_command(
             ["python", "slow.py"],
-            purpose="test",
+            purpose="run",
             timeout_seconds=1,
         )
     )
@@ -336,21 +376,31 @@ def test_child_process_does_not_receive_api_key(
         "env_check.py",
         (
             "import os\n"
-            "print(os.getenv('QWEN_API_KEY', 'MISSING'))\n"
+            "for key in ('QWEN_API_KEY', 'GITHUB_TOKEN', 'HF_TOKEN', 'AWS_ACCESS_KEY_ID'):\n"
+            "    print(f'{key}={os.getenv(key, \"MISSING\")}')\n"
         ),
     )
     monkeypatch.setenv("QWEN_API_KEY", "super-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("HF_TOKEN", "hf-secret")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKE")
     tools = CommandTools(root)
 
     result = decode(
         tools.run_command(
             ["python", "env_check.py"],
-            purpose="test",
+            purpose="run",
         )
     )
 
     assert result["ok"] is True
-    assert result["stdout"].strip() == "MISSING"
+    lines = result["stdout"].strip().splitlines()
+    assert lines == [
+        "QWEN_API_KEY=MISSING",
+        "GITHUB_TOKEN=MISSING",
+        "HF_TOKEN=MISSING",
+        "AWS_ACCESS_KEY_ID=MISSING",
+    ]
 
 
 def test_cmake_configure_paths_are_kept_inside_workspace(
@@ -384,6 +434,37 @@ def test_cmake_configure_paths_are_kept_inside_workspace(
     assert captured["cwd"] == root.resolve()
     assert captured["command"][2] == str(root.resolve())
     assert captured["command"][4] == str((root / "build").resolve())
+
+
+
+def test_ctest_list_only_is_not_validation_eligible(
+    monkeypatch,
+    tmp_path: Path,
+):
+    root = tmp_path / "workspace"
+    build = root / "build"
+    build.mkdir(parents=True)
+    tools = CommandTools(root)
+
+    monkeypatch.setattr(
+        "tools.command_tools.subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="listed",
+            stderr="",
+        ),
+    )
+
+    result = decode(
+        tools.run_command(
+            ["ctest", "--test-dir", "build", "-N"],
+            purpose="test",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["validation_eligible"] is False
+    assert result["validation_reason"] == "ctest_list_only"
 
 
 def test_cmake_build_and_ctest_accept_workspace_build_directory(

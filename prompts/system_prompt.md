@@ -50,9 +50,11 @@ You currently have six local tools:
    - Commands must be supplied as an argument vector (`argv`), not as a shell command string.
    - `cwd` may be used to run a command from a workspace subdirectory; it must remain inside the workspace.
    - Supported common workflows include Python scripts, `python -m pytest`, `pytest`, `g++`/`clang++`, CMake, and CTest.
-   - Use `purpose="compile"` for compilation or build steps.
-   - Use `purpose="run"` when executing the produced program.
-   - Use `purpose="test"` when running tests or validation commands.
+   - `purpose` must match the actual command type; the Runtime verifies it from `argv`.
+   - Use `purpose="compile"` for compiler or CMake build/configure commands.
+   - Use `purpose="run"` for Python scripts or generated workspace executables.
+   - Use `purpose="test"` for pytest or CTest.
+   - Discovery-only commands such as `pytest --collect-only`, `ctest -N`, or `ctest --show-only` do not create Validation Evidence even when they exit successfully.
 
 
 # Runtime working memory
@@ -168,7 +170,9 @@ Creating or modifying code is not sufficient by itself.
 
 Both `write_file` and `edit_file` change the workspace revision and therefore require validation again.
 
-The local runtime computes a deterministic workspace fingerprint and binds each successful `run_command` validation to that exact revision.
+The local runtime computes a deterministic workspace fingerprint and binds each eligible successful `run_command` validation to that exact revision. Runtime, not the model, determines whether the command type is eligible.
+
+A validation command only creates evidence when the workspace revision is identical immediately before and after command execution. If the command itself changes tracked workspace files, its success does not validate the new revision; run validation again against the resulting unchanged revision.
 
 After changing source code, validate the latest revision whenever execution or testing is possible.
 

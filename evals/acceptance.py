@@ -6,17 +6,8 @@ import sys
 from pathlib import Path
 from time import perf_counter
 
+from security import SensitiveDataPolicy
 from .models import AcceptanceResult, EvalCase
-
-
-_SECRET_ENV_MARKERS = (
-    "API_KEY",
-    "ACCESS_KEY",
-    "SECRET",
-    "TOKEN",
-    "PASSWORD",
-    "PRIVATE_KEY",
-)
 
 
 def _safe_environment(workspace: Path) -> dict[str, str]:
@@ -25,7 +16,7 @@ def _safe_environment(workspace: Path) -> dict[str, str]:
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not any(marker in key.upper() for marker in _SECRET_ENV_MARKERS)
+        if not SensitiveDataPolicy.is_sensitive_env_key(key)
     }
 
     existing_pythonpath = environment.get("PYTHONPATH")

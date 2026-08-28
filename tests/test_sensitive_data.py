@@ -19,6 +19,7 @@ def test_redact_text_masks_assignment_bearer_and_known_token():
 
     text = (
         "OPENAI_API_KEY=definitely-not-a-real-key\n"
+        "AWS_SECRET_ACCESS_KEY=definitely-not-a-real-secret\n"
         "Authorization: Bearer abcdefghijklmnop\n"
         f"raw={fake_token}\n"
     )
@@ -26,6 +27,7 @@ def test_redact_text_masks_assignment_bearer_and_known_token():
     redacted = policy.redact_text(text)
 
     assert "definitely-not-a-real-key" not in redacted
+    assert "definitely-not-a-real-secret" not in redacted
     assert "abcdefghijklmnop" not in redacted
     assert fake_token not in redacted
     assert "OPENAI_API_KEY=[REDACTED]" in redacted
@@ -72,3 +74,15 @@ def test_redact_text_redacts_json_by_sensitive_key():
     assert "fake-value" not in result
     assert "[REDACTED]" in result
     assert "visible" in result
+
+
+def test_sensitive_environment_key_detection_is_shared_and_conservative():
+    policy = SensitiveDataPolicy()
+
+    assert policy.is_sensitive_env_key("OPENAI_API_KEY") is True
+    assert policy.is_sensitive_env_key("GITHUB_TOKEN") is True
+    assert policy.is_sensitive_env_key("HF_TOKEN") is True
+    assert policy.is_sensitive_env_key("AWS_ACCESS_KEY_ID") is True
+    assert policy.is_sensitive_env_key("AWS_SECRET_ACCESS_KEY") is True
+    assert policy.is_sensitive_env_key("TOKENIZERS_PARALLELISM") is False
+    assert policy.is_sensitive_env_key("PATH") is False
