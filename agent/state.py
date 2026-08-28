@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from .validation import ValidationRecord
+from .working_memory import WorkingMemory
 
 
 @dataclass
@@ -32,6 +33,10 @@ class AgentState:
         default_factory=list
     )
 
+    working_memory: WorkingMemory = field(
+        default_factory=WorkingMemory
+    )
+
     total_tool_calls: int = 0
 
     consecutive_errors: int = 0
@@ -56,6 +61,8 @@ class AgentState:
         self.validated_revision = None
 
         self.validation_records = []
+
+        self.working_memory.reset()
 
         self.total_tool_calls = 0
 
@@ -122,6 +129,19 @@ class AgentState:
             data.get("validation_records", [])
         )
 
+        working_memory_data = data.get(
+            "working_memory"
+        )
+
+        if working_memory_data is None:
+            # Backward compatibility for sessions created before
+            # structured working memory existed.
+            self.working_memory.reset()
+        else:
+            self.working_memory.restore(
+                working_memory_data
+            )
+
         self.total_tool_calls = self._restore_int(
             data=data,
             key="total_tool_calls",
@@ -172,6 +192,14 @@ class AgentState:
                     "validation record."
                 )
 
+        # Revision fields in AgentState remain authoritative. This also
+        # reconstructs useful memory facts when restoring an older session
+        # that did not persist WorkingMemory yet.
+        self.working_memory.sync_revisions(
+            current_revision=self.current_revision,
+            validated_revision=self.validated_revision,
+        )
+
     def prepare_for_resume(
         self,
     ) -> None:
@@ -213,6 +241,11 @@ class AgentState:
             )
 
         self.current_revision = revision
+
+        self.working_memory.sync_revisions(
+            current_revision=self.current_revision,
+            validated_revision=self.validated_revision,
+        )
 
     # ========================================================
     # Tool result
@@ -318,6 +351,22 @@ class AgentState:
                         )
                     )
 
+        # ----------------------------------------------------
+        # Structured working memory
+        # ----------------------------------------------------
+
+        self.working_memory.record_tool_result(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            step=self.step,
+        )
+
+        self.working_memory.sync_revisions(
+            current_revision=self.current_revision,
+            validated_revision=self.validated_revision,
+        )
+
     # ========================================================
     # Runtime errors
     # ========================================================
@@ -328,6 +377,7 @@ class AgentState:
     ) -> None:
         self.consecutive_errors += 1
         self.last_error = error
+        self.working_memory.last_error = error
 
     # ========================================================
     # Derived states

@@ -18,6 +18,7 @@ Agent Loop、上下文管理、工具执行、模型输出解析、终止策略�
 - 局部代码修改：`edit_file`
 - 本地编译 / 运行 / 测试：`run_command`
 - 对话历史与上下文管理
+- Structured Working Memory：Runtime 自动维护任务状态摘要
 - 错误恢复与模型重试
 - Workspace Revision：SHA-256 文件状态指纹
 - Validation Evidence：验证命令与代码状态绑定
@@ -43,6 +44,8 @@ finish
 ```
 
 Agent 修改代码后不能直接结束。Runtime 会为 Workspace 计算确定性的 SHA-256 revision，并把成功的运行 / 测试记录为 Validation Evidence。只有当前 revision 与最近一次成功验证的 revision 完全一致时才允许完成任务；如果验证后文件被再次修改，即使修改来自 Agent 外部，也必须重新验证。
+
+上下文管理同时维护三个不同层次：Conversation History 保存完整事件历史；Structured Working Memory 根据真实 Tool Result 自动记录已检查/修改文件、最近命令、错误与验证状态；ContextManager 则把 System Prompt、原始任务、Working Memory 和最近消息组合成下一次实际发送给模型的上下文。Working Memory 不由 LLM 自行总结，因此不会把模型的自述当作运行时事实。
 
 ## Quick Start
 
@@ -99,7 +102,7 @@ python -m pytest -q
 当前测试集：
 
 ```text
-136 passed
+150 passed
 ```
 
 ## Project Structure

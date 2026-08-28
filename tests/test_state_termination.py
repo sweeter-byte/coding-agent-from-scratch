@@ -339,3 +339,96 @@ def test_finish_rejected_when_workspace_changed_after_validation():
     assert decision.action == TerminationAction.CONTINUE
     assert decision.reason == "workspace_changed_after_validation"
     assert "stale" in decision.feedback
+
+
+def test_state_updates_working_memory_from_real_tool_results():
+    state = AgentState()
+    state.begin_step(1)
+
+    state.record_tool_result(
+        "read_file",
+        {"path": "src/main.py"},
+        {"ok": True, "path": "src/main.py"},
+    )
+
+    state.begin_step(2)
+    state.record_tool_result(
+        "edit_file",
+        {
+            "path": "src/main.py",
+            "old_text": "old",
+            "new_text": "new",
+        },
+        {"ok": True, "path": "src/main.py"},
+        workspace_revision="revision-b",
+    )
+
+    assert state.working_memory.inspected_files == ["src/main.py"]
+    assert state.working_memory.modified_files == ["src/main.py"]
+    assert state.working_memory.current_revision == "revision-b"
+
+
+def test_state_successful_validation_updates_working_memory_evidence():
+    state = AgentState()
+    state.begin_step(1)
+
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True, "path": "main.py"},
+        workspace_revision="revision-a",
+    )
+
+    state.begin_step(2)
+    state.record_tool_result(
+        "run_command",
+        {
+            "argv": ["python", "main.py"],
+            "purpose": "test",
+        },
+        {"ok": True, "returncode": 0},
+        workspace_revision="revision-a",
+    )
+
+    memory = state.working_memory
+
+    assert memory.validation_status == "passed"
+    assert memory.current_revision == "revision-a"
+    assert memory.validated_revision == "revision-a"
+    assert memory.last_validation is not None
+    assert memory.last_validation.argv == ["python", "main.py"]
+    assert memory.last_validation.step == 2
+
+
+def test_state_restore_restores_persisted_working_memory():
+    state = AgentState()
+
+    state.restore(
+        {
+            "step": 3,
+            "write_version": 1,
+            "validated_version": -1,
+            "current_revision": "revision-b",
+            "validated_revision": None,
+            "validation_records": [],
+            "working_memory": {
+                "inspected_files": ["main.py"],
+                "modified_files": ["main.py"],
+                "recent_commands": [],
+                "last_failed_command": None,
+                "last_error": "test failed",
+                "current_revision": "revision-b",
+                "validated_revision": None,
+                "last_validation": None,
+            },
+            "total_tool_calls": 2,
+            "consecutive_errors": 1,
+            "last_tool_name": "run_command",
+            "last_error": "test failed",
+        }
+    )
+
+    assert state.working_memory.inspected_files == ["main.py"]
+    assert state.working_memory.modified_files == ["main.py"]
+    assert state.working_memory.last_error == "test failed"
+    assert state.working_memory.current_revision == "revision-b"

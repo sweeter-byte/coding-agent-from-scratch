@@ -354,6 +354,18 @@ def test_agent_can_resume_failed_session_and_continue_same_runtime(
         for message in resumed_context
     )
 
+    resumed_memory = next(
+        message
+        for message in resumed_context
+        if message.get("role") == "system"
+        and message.get("content", "").startswith(
+            "[Runtime working memory]"
+        )
+    )
+    assert "resume_demo.py" in resumed_memory["content"]
+    assert "python missing.py" in resumed_memory["content"]
+    assert "Validation status: failed" in resumed_memory["content"]
+
     completed_snapshot = resumed_agent.session_store.load(session_id)
     assert completed_snapshot["metadata"]["status"] == "completed"
     assert completed_snapshot["metadata"]["error"] is None
@@ -1004,3 +1016,89 @@ def test_resume_detects_workspace_change_and_requires_revalidation(
         in message.get("content", "").lower()
         for message in first_resume_context
     )
+
+
+def test_agent_injects_structured_working_memory_into_each_model_context(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    from dataclasses import replace
+
+    config = replace(
+        agent_config,
+        max_context_messages=2,
+    )
+
+    fake_llm = FakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "write-memory",
+                        "write_file",
+                        {
+                            "path": "memory_demo.py",
+                            "content": "print('memory ok')\n",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "test-memory",
+                        "run_command",
+                        {
+                            "argv": ["python", "memory_demo.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+            response(content="Working memory task completed."),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=tmp_path / "traces",
+            run_id=run_id,
+        ),
+    )
+
+    agent = CodingAgent(config=config)
+    agent.llm_client = fake_llm
+    agent.session_store = SessionStore(tmp_path / "sessions")
+
+    result = agent.run("Create and test memory_demo.py")
+
+    assert result == "Working memory task completed."
+
+    second_context = fake_llm.calls[1]["messages"]
+    second_memory = next(
+        message
+        for message in second_context
+        if message.get("role") == "system"
+        and message.get("content", "").startswith("[Runtime working memory]")
+    )
+
+    assert "memory_demo.py" in second_memory["content"]
+    assert "Validation status: not_validated" in second_memory["content"]
+
+    final_context = fake_llm.calls[2]["messages"]
+    final_memory = next(
+        message
+        for message in final_context
+        if message.get("role") == "system"
+        and message.get("content", "").startswith("[Runtime working memory]")
+    )
+
+    assert "Validation status: passed" in final_memory["content"]
+    assert "python memory_demo.py" in final_memory["content"]
+
+    stored = agent.session_store.load(agent.session_id)
+    assert stored["state"]["working_memory"]["modified_files"] == [
+        "memory_demo.py"
+    ]

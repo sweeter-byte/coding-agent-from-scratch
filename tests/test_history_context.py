@@ -99,3 +99,65 @@ def test_context_fallback_without_system_message():
         "two",
         "three",
     ]
+
+
+def test_context_injects_runtime_working_memory_without_consuming_tail_budget():
+    from agent.working_memory import WorkingMemory
+
+    history = ConversationHistory()
+    history.reset("system", "original task")
+    history.add_assistant_message(
+        {"role": "assistant", "content": "old-1"}
+    )
+    history.add_user_message("old-2")
+    history.add_assistant_message(
+        {"role": "assistant", "content": "recent-1"}
+    )
+    history.add_user_message("recent-2")
+
+    memory = WorkingMemory(
+        inspected_files=["src/main.py"],
+        modified_files=["src/main.py"],
+        current_revision="revision-a",
+    )
+
+    context = ContextManager(
+        max_context_messages=3
+    ).build(
+        history,
+        working_memory=memory,
+    )
+
+    assert context[0] == {
+        "role": "system",
+        "content": "system",
+    }
+    assert context[1]["role"] == "system"
+    assert "[Runtime working memory]" in context[1]["content"]
+    assert "src/main.py" in context[1]["content"]
+    assert context[2] == {
+        "role": "user",
+        "content": "original task",
+    }
+    assert [
+        message["content"]
+        for message in context[3:]
+    ] == ["recent-1", "recent-2"]
+
+
+def test_context_without_working_memory_keeps_previous_layout():
+    history = ConversationHistory()
+    history.reset("system", "task")
+    history.add_assistant_message(
+        {"role": "assistant", "content": "answer"}
+    )
+
+    context = ContextManager(
+        max_context_messages=4
+    ).build(history)
+
+    assert context == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "answer"},
+    ]

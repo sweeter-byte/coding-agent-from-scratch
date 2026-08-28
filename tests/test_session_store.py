@@ -163,3 +163,33 @@ def test_session_store_redacts_persisted_sensitive_values(tmp_path: Path):
     assert "fake-session-value" not in serialized
     assert data["metadata"]["api_key"] == "[REDACTED]"
     assert "[REDACTED]" in data["messages"][0]["content"]
+
+
+def test_save_history_persists_structured_working_memory(tmp_path: Path):
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create_session()
+
+    history = ConversationHistory()
+    history.reset("system", "task")
+
+    state = AgentState()
+    state.begin_step(1)
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True, "path": "main.py"},
+        workspace_revision="revision-a",
+    )
+
+    store.save_history(
+        session_id,
+        history,
+        state=state,
+    )
+
+    data = store.load(session_id)
+    memory = data["state"]["working_memory"]
+
+    assert memory["modified_files"] == ["main.py"]
+    assert memory["current_revision"] == "revision-a"
+    assert memory["validated_revision"] is None

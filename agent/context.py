@@ -1,4 +1,5 @@
 from .history import ConversationHistory
+from .working_memory import WorkingMemory
 
 
 class ContextManager:
@@ -9,12 +10,13 @@ class ContextManager:
     decides which part of that history should be included in the next
     model call.
 
-    First version strategy:
+    Current strategy:
 
     1. Always keep the system prompt.
     2. Always keep the original user task.
-    3. Keep only the most recent remaining messages when history grows.
-    4. Never start the retained tail with an orphaned tool message.
+    3. Inject deterministic runtime WorkingMemory when available.
+    4. Keep only the most recent remaining messages when history grows.
+    5. Never start the retained tail with an orphaned tool message.
 
     This is intentionally a simple message-count based strategy.
 
@@ -43,6 +45,7 @@ class ContextManager:
     def build(
         self,
         history: ConversationHistory,
+        working_memory: WorkingMemory | None = None,
     ) -> list[dict]:
         messages = (
             history.get_messages()
@@ -123,11 +126,23 @@ class ContextManager:
             ):
                 tail.pop(0)
 
-        return [
+        selected = [
             system_message,
-            task_message,
-            *tail,
         ]
+
+        if working_memory is not None:
+            selected.append(
+                working_memory.to_context_message()
+            )
+
+        selected.extend(
+            [
+                task_message,
+                *tail,
+            ]
+        )
+
+        return selected
 
     # ========================================================
     # Fallback context

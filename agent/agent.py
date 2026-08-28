@@ -99,6 +99,9 @@ class CodingAgent:
     - ContextManager
         model-input context selection
 
+    - WorkingMemory (inside AgentState)
+        deterministic task-state summary derived from tool results
+
     - LLMClient
         model API access
 
@@ -714,7 +717,10 @@ class CodingAgent:
                 context = (
                     self.context_manager
                     .build(
-                        self.history
+                        self.history,
+                        working_memory=(
+                            self.state.working_memory
+                        ),
                     )
                 )
 
