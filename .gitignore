@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 workspace/
+data/
+logs/
