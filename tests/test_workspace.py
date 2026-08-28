@@ -73,3 +73,69 @@ def test_symlink_escape_is_rejected(tmp_path: Path):
 
     with pytest.raises(ValueError, match="escapes the workspace"):
         workspace.resolve_file("link.txt", must_exist=True)
+
+
+def test_workspace_revision_is_deterministic_and_changes_with_content(
+    tmp_path: Path,
+):
+    workspace = WorkspaceManager(tmp_path / "workspace")
+
+    source = workspace.root / "main.py"
+    source.write_text("print('v1')\n", encoding="utf-8")
+
+    first = workspace.calculate_revision()
+    second = workspace.calculate_revision()
+
+    assert first == second
+    assert len(first) == 64
+
+    source.write_text("print('v2')\n", encoding="utf-8")
+
+    assert workspace.calculate_revision() != first
+
+
+def test_workspace_revision_ignores_common_runtime_cache_directories(
+    tmp_path: Path,
+):
+    workspace = WorkspaceManager(tmp_path / "workspace")
+
+    (workspace.root / "main.py").write_text(
+        "print('stable')\n",
+        encoding="utf-8",
+    )
+
+    before = workspace.calculate_revision()
+
+    cache = workspace.root / ".pytest_cache"
+    cache.mkdir()
+    (cache / "nodeids").write_text(
+        "generated cache",
+        encoding="utf-8",
+    )
+
+    pycache = workspace.root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "main.cpython.pyc").write_bytes(b"generated")
+
+    assert workspace.calculate_revision() == before
+
+
+def test_workspace_revision_tracks_symlink_without_following_external_target(
+    tmp_path: Path,
+):
+    workspace = WorkspaceManager(tmp_path / "workspace")
+
+    outside_one = tmp_path / "outside-one.txt"
+    outside_two = tmp_path / "outside-two.txt"
+    outside_one.write_text("secret-one", encoding="utf-8")
+    outside_two.write_text("secret-two", encoding="utf-8")
+
+    link = workspace.root / "linked.txt"
+    link.symlink_to(outside_one)
+
+    first = workspace.calculate_revision()
+
+    link.unlink()
+    link.symlink_to(outside_two)
+
+    assert workspace.calculate_revision() != first

@@ -200,3 +200,142 @@ def test_edit_file_marks_latest_source_version_dirty():
     assert state.write_version == 2
     assert state.validated_version == 1
     assert state.latest_version_validated is False
+
+
+def test_state_binds_validation_to_workspace_revision():
+    state = AgentState()
+
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True},
+        workspace_revision="revision-a",
+    )
+
+    state.begin_step(2)
+    state.record_tool_result(
+        "run_command",
+        {
+            "argv": ["python", "main.py"],
+            "purpose": "test",
+        },
+        {
+            "ok": True,
+            "returncode": 0,
+        },
+        workspace_revision="revision-a",
+    )
+
+    assert state.current_revision == "revision-a"
+    assert state.validated_revision == "revision-a"
+    assert state.latest_version_validated is True
+    assert len(state.validation_records) == 1
+
+    record = state.validation_records[0]
+    assert record.revision == "revision-a"
+    assert record.argv == ["python", "main.py"]
+    assert record.purpose == "test"
+    assert record.returncode == 0
+    assert record.step == 2
+
+
+def test_revision_change_invalidates_equal_logical_versions():
+    state = AgentState(
+        write_version=1,
+        validated_version=1,
+        current_revision="revision-new",
+        validated_revision="revision-old",
+    )
+
+    assert state.workspace_changed_after_validation is True
+    assert state.latest_version_validated is False
+
+
+def test_failed_command_can_dirty_previously_validated_workspace():
+    state = AgentState()
+
+    state.record_tool_result(
+        "write_file",
+        {"path": "main.py"},
+        {"ok": True},
+        workspace_revision="revision-a",
+    )
+    state.record_tool_result(
+        "run_command",
+        {
+            "argv": ["python", "main.py"],
+            "purpose": "test",
+        },
+        {"ok": True, "returncode": 0},
+        workspace_revision="revision-a",
+    )
+
+    assert state.latest_version_validated is True
+
+    state.record_tool_result(
+        "run_command",
+        {
+            "argv": ["python", "mutating_script.py"],
+            "purpose": "test",
+        },
+        {
+            "ok": False,
+            "returncode": 1,
+            "stderr": "failed",
+        },
+        workspace_revision="revision-b",
+    )
+
+    assert state.current_revision == "revision-b"
+    assert state.validated_revision == "revision-a"
+    assert state.workspace_changed_after_validation is True
+    assert state.latest_version_validated is False
+
+
+def test_state_restore_restores_revision_validation_evidence():
+    state = AgentState()
+
+    state.restore(
+        {
+            "step": 5,
+            "write_version": 2,
+            "validated_version": 2,
+            "current_revision": "revision-a",
+            "validated_revision": "revision-a",
+            "validation_records": [
+                {
+                    "revision": "revision-a",
+                    "argv": ["python", "-m", "pytest", "-q"],
+                    "purpose": "test",
+                    "returncode": 0,
+                    "step": 4,
+                }
+            ],
+            "total_tool_calls": 4,
+            "consecutive_errors": 0,
+            "last_tool_name": "run_command",
+            "last_error": None,
+        }
+    )
+
+    assert state.current_revision == "revision-a"
+    assert state.validated_revision == "revision-a"
+    assert state.latest_version_validated is True
+    assert len(state.validation_records) == 1
+    assert state.validation_records[0].step == 4
+
+
+def test_finish_rejected_when_workspace_changed_after_validation():
+    state = AgentState(
+        write_version=1,
+        validated_version=1,
+        current_revision="revision-b",
+        validated_revision="revision-a",
+    )
+    policy = TerminationPolicy(max_steps=5)
+
+    decision = policy.evaluate_finish_request(state)
+
+    assert decision.action == TerminationAction.CONTINUE
+    assert decision.reason == "workspace_changed_after_validation"
+    assert "stale" in decision.feedback

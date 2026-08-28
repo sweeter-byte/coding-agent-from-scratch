@@ -45,7 +45,7 @@ class TerminationPolicy:
     Current rules:
 
     1. The model cannot finish before creating source code.
-    2. The latest written version must pass a successful run/test.
+    2. Successful validation must match the current workspace revision.
     3. Too many consecutive runtime/tool errors stop the loop.
     4. max_steps provides the final hard upper bound.
     """
@@ -111,8 +111,25 @@ class TerminationPolicy:
 
         # ----------------------------------------------------
         # Guard 2:
-        # latest version must be validated
+        # validation evidence must match current workspace
         # ----------------------------------------------------
+
+        if state.workspace_changed_after_validation:
+            return TerminationDecision(
+                action=(
+                    TerminationAction.CONTINUE
+                ),
+                reason=(
+                    "workspace_changed_after_validation"
+                ),
+                feedback=(
+                    "The workspace changed after the last "
+                    "successful validation. Previous validation "
+                    "evidence is stale. Re-run the appropriate "
+                    "command with purpose='run' or purpose='test' "
+                    "before finishing."
+                ),
+            )
 
         if (
             not state
@@ -126,12 +143,10 @@ class TerminationPolicy:
                     "latest_version_not_validated"
                 ),
                 feedback=(
-                    "The latest source-code "
-                    "version has not passed "
-                    "successful runtime validation. "
-                    "Continue using run_command "
-                    "with purpose='run' or "
-                    "purpose='test'."
+                    "The latest source-code version has not passed "
+                    "successful runtime validation for the current "
+                    "workspace revision. Continue using run_command "
+                    "with purpose='run' or purpose='test'."
                 ),
             )
 

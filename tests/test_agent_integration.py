@@ -790,3 +790,217 @@ def test_agent_edit_pytest_fail_fix_pytest_pass_finish_flow(
     assert passed_result["ok"] is True
     assert passed_result["returncode"] == 0
     assert passed_result["cwd"] == "project"
+
+
+def test_agent_rejects_finish_after_external_workspace_change(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    source_path = agent_config.workspace / "revision_demo.py"
+
+    class MutatingFakeLLMClient(FakeLLMClient):
+        def create_completion(self, messages, tools):
+            # Before the third model response attempts to finish, emulate
+            # an external editor changing the file behind the agent's back.
+            if len(self.calls) == 2:
+                source_path.write_text(
+                    "print('externally changed')\n",
+                    encoding="utf-8",
+                )
+
+            return super().create_completion(messages, tools)
+
+    fake_llm = MutatingFakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "write-revision",
+                        "write_file",
+                        {
+                            "path": "revision_demo.py",
+                            "content": "print('original')\n",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "test-original",
+                        "run_command",
+                        {
+                            "argv": ["python", "revision_demo.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+            response(content="Finished after first validation."),
+            response(
+                calls=[
+                    tool_call(
+                        "test-changed",
+                        "run_command",
+                        {
+                            "argv": ["python", "revision_demo.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+            response(content="Finished after revalidation."),
+        ]
+    )
+
+    trace_dir = tmp_path / "traces"
+
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=trace_dir,
+            run_id=run_id,
+        ),
+    )
+
+    agent = CodingAgent(config=agent_config)
+    agent.llm_client = fake_llm
+    agent.session_store = SessionStore(tmp_path / "sessions")
+
+    result = agent.run(
+        "Create and validate revision_demo.py"
+    )
+
+    assert result == "Finished after revalidation."
+    assert agent.state.step == 5
+    assert agent.state.latest_version_validated is True
+    assert len(agent.state.validation_records) == 2
+    assert (
+        agent.state.validation_records[0].revision
+        != agent.state.validation_records[1].revision
+    )
+
+    fourth_context = fake_llm.calls[3]["messages"]
+    assert any(
+        message.get("role") == "user"
+        and "workspace changed after the last successful validation"
+        in message.get("content", "").lower()
+        for message in fourth_context
+    )
+
+    stored = agent.session_store.load(agent.session_id)
+    assert stored["metadata"]["status"] == "completed"
+    assert stored["state"]["current_revision"] == (
+        stored["state"]["validated_revision"]
+    )
+    assert len(stored["state"]["validation_records"]) == 2
+
+
+def test_resume_detects_workspace_change_and_requires_revalidation(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    from dataclasses import replace
+    import pytest
+
+    trace_dir = tmp_path / "traces"
+    session_dir = tmp_path / "sessions"
+
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=trace_dir,
+            run_id=run_id,
+        ),
+    )
+
+    first_agent = CodingAgent(
+        config=replace(
+            agent_config,
+            max_steps=2,
+        )
+    )
+    first_agent.session_store = SessionStore(session_dir)
+    first_agent.llm_client = FakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "resume-write-revision",
+                        "write_file",
+                        {
+                            "path": "resume_revision.py",
+                            "content": "print('v1')\n",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "resume-test-revision",
+                        "run_command",
+                        {
+                            "argv": ["python", "resume_revision.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="maximum number of steps"):
+        first_agent.run("Create and test resume_revision.py")
+
+    session_id = first_agent.session_id
+    assert session_id is not None
+    assert first_agent.state.latest_version_validated is True
+
+    source = agent_config.workspace / "resume_revision.py"
+    source.write_text("print('v2 external')\n", encoding="utf-8")
+
+    resumed_llm = FakeLLMClient(
+        [
+            response(content="Finish using old validation."),
+            response(
+                calls=[
+                    tool_call(
+                        "resume-retest-revision",
+                        "run_command",
+                        {
+                            "argv": ["python", "resume_revision.py"],
+                            "purpose": "test",
+                        },
+                    )
+                ]
+            ),
+            response(content="Finish after fresh validation."),
+        ]
+    )
+
+    resumed_agent = CodingAgent(
+        config=replace(
+            agent_config,
+            max_steps=5,
+        )
+    )
+    resumed_agent.session_store = SessionStore(session_dir)
+    resumed_agent.llm_client = resumed_llm
+
+    result = resumed_agent.resume(session_id)
+
+    assert result == "Finish after fresh validation."
+    assert resumed_agent.state.step == 5
+    assert resumed_agent.state.latest_version_validated is True
+    assert len(resumed_agent.state.validation_records) == 2
+
+    first_resume_context = resumed_llm.calls[0]["messages"]
+    assert any(
+        message.get("role") == "user"
+        and "workspace contents changed since this session"
+        in message.get("content", "").lower()
+        for message in first_resume_context
+    )

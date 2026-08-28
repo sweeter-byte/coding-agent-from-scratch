@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .validation import ValidationRecord
 
 
 @dataclass
@@ -9,6 +11,11 @@ class AgentState:
     The state is separated from CodingAgent so that termination rules,
     debugging logic, and future UI code can inspect the agent's current
     progress without depending on local variables inside run().
+
+    write_version / validated_version remain as lightweight logical
+    counters for observability and backward-compatible session restore.
+    Workspace revisions provide the stronger correctness guarantee used
+    by the runtime finish guard.
     """
 
     step: int = 0
@@ -16,6 +23,14 @@ class AgentState:
     write_version: int = 0
 
     validated_version: int = -1
+
+    current_revision: str | None = None
+
+    validated_revision: str | None = None
+
+    validation_records: list[ValidationRecord] = field(
+        default_factory=list
+    )
 
     total_tool_calls: int = 0
 
@@ -36,6 +51,12 @@ class AgentState:
 
         self.validated_version = -1
 
+        self.current_revision = None
+
+        self.validated_revision = None
+
+        self.validation_records = []
+
         self.total_tool_calls = 0
 
         self.consecutive_errors = 0
@@ -44,7 +65,6 @@ class AgentState:
 
         self.last_error = None
 
-
     def restore(
         self,
         data: dict,
@@ -52,8 +72,11 @@ class AgentState:
         """
         Restore runtime state from persisted session data.
 
-        Durable progress fields are restored exactly so that a
-        resumed agent continues from the previous execution state.
+        New revision fields are optional so sessions created before the
+        revision feature can still be loaded. Once resumed, CodingAgent
+        refreshes the actual workspace fingerprint and requires a fresh
+        validation before completion when no persisted revision evidence
+        exists.
         """
 
         if not isinstance(
@@ -83,6 +106,20 @@ class AgentState:
             key="validated_version",
             default=-1,
             minimum=-1,
+        )
+
+        self.current_revision = self._restore_optional_string(
+            data=data,
+            key="current_revision",
+        )
+
+        self.validated_revision = self._restore_optional_string(
+            data=data,
+            key="validated_revision",
+        )
+
+        self.validation_records = self._restore_validation_records(
+            data.get("validation_records", [])
         )
 
         self.total_tool_calls = self._restore_int(
@@ -115,15 +152,35 @@ class AgentState:
                 "than write_version."
             )
 
+        if (
+            self.validated_revision is not None
+            and self.current_revision is None
+        ):
+            raise ValueError(
+                "validated_revision requires current_revision."
+            )
+
+        if self.validation_records:
+            last_record = self.validation_records[-1]
+
+            if (
+                self.validated_revision is not None
+                and last_record.revision != self.validated_revision
+            ):
+                raise ValueError(
+                    "validated_revision must match the latest "
+                    "validation record."
+                )
+
     def prepare_for_resume(
         self,
     ) -> None:
         """
         Clear transient failure state before resuming a session.
 
-        Durable task progress such as step/write/validation versions
-        is intentionally preserved. A previous burst of errors should
-        not cause the freshly resumed process to stop immediately.
+        Durable task progress such as step/write/validation evidence is
+        intentionally preserved. A previous burst of errors should not
+        cause the freshly resumed process to stop immediately.
         """
 
         self.consecutive_errors = 0
@@ -141,6 +198,23 @@ class AgentState:
         self.step = step
 
     # ========================================================
+    # Workspace revision
+    # ========================================================
+
+    def observe_workspace_revision(
+        self,
+        revision: str,
+    ) -> None:
+        """Record the latest filesystem fingerprint observed by runtime."""
+
+        if not isinstance(revision, str) or not revision:
+            raise ValueError(
+                "workspace revision must be a non-empty string."
+            )
+
+        self.current_revision = revision
+
+    # ========================================================
     # Tool result
     # ========================================================
 
@@ -149,9 +223,15 @@ class AgentState:
         tool_name: str,
         arguments: dict,
         result: dict,
+        workspace_revision: str | None = None,
     ) -> None:
         """
         Update runtime state after one local tool execution.
+
+        workspace_revision should be the post-execution fingerprint for
+        tools that may change workspace contents. Recording the revision
+        even after a failed command lets the runtime detect partial file
+        changes caused before that command returned a non-zero status.
         """
 
         self.total_tool_calls += 1
@@ -159,6 +239,11 @@ class AgentState:
         self.last_tool_name = (
             tool_name
         )
+
+        if workspace_revision is not None:
+            self.observe_workspace_revision(
+                workspace_revision
+            )
 
         ok = bool(
             result.get("ok")
@@ -214,6 +299,25 @@ class AgentState:
                     self.write_version
                 )
 
+                if workspace_revision is not None:
+                    self.validated_revision = (
+                        workspace_revision
+                    )
+
+                    self.validation_records.append(
+                        ValidationRecord(
+                            revision=workspace_revision,
+                            argv=self._normalize_argv(
+                                arguments.get("argv")
+                            ),
+                            purpose=purpose,
+                            returncode=self._normalize_returncode(
+                                result.get("returncode")
+                            ),
+                            step=self.step,
+                        )
+                    )
+
     # ========================================================
     # Runtime errors
     # ========================================================
@@ -241,16 +345,42 @@ class AgentState:
     def latest_version_validated(
         self,
     ) -> bool:
+        """
+        Return whether the current workspace has valid evidence.
+
+        Revision-aware state takes precedence. The logical integer
+        counters are retained only as a fallback for older persisted
+        sessions and direct unit-level state construction.
+        """
+
+        if self.current_revision is not None:
+            return (
+                self.write_version > 0
+                and self.validated_revision is not None
+                and self.validated_revision
+                == self.current_revision
+            )
+
         return (
             self.write_version > 0
             and self.validated_version
             == self.write_version
         )
 
+    @property
+    def workspace_changed_after_validation(
+        self,
+    ) -> bool:
+        return (
+            self.current_revision is not None
+            and self.validated_revision is not None
+            and self.current_revision
+            != self.validated_revision
+        )
+
     # ========================================================
     # Helpers
     # ========================================================
-
 
     @staticmethod
     def _restore_int(
@@ -301,10 +431,45 @@ class AgentState:
         if not isinstance(
             value,
             str,
-        ):
+        ) or not value:
             raise ValueError(
                 f"Invalid persisted state field '{key}'."
             )
+
+        return value
+
+    @staticmethod
+    def _restore_validation_records(
+        value: object,
+    ) -> list[ValidationRecord]:
+        if not isinstance(value, list):
+            raise ValueError(
+                "Invalid persisted state field 'validation_records'."
+            )
+
+        return [
+            ValidationRecord.from_dict(item)
+            for item in value
+        ]
+
+    @staticmethod
+    def _normalize_argv(
+        value: object,
+    ) -> list[str]:
+        if not isinstance(value, list):
+            return []
+
+        return [
+            str(item)
+            for item in value
+        ]
+
+    @staticmethod
+    def _normalize_returncode(
+        value: object,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
 
         return value
 

@@ -155,15 +155,17 @@ If compilation or execution fails, use the returned stdout/stderr to diagnose th
 
 Creating or modifying code is not sufficient by itself.
 
-Both `write_file` and `edit_file` create a new source version that must be validated again.
+Both `write_file` and `edit_file` change the workspace revision and therefore require validation again.
 
-After changing source code, validate the latest version whenever execution or testing is possible.
+The local runtime computes a deterministic workspace fingerprint and binds each successful `run_command` validation to that exact revision.
 
-A previous successful run does not validate code that was modified afterwards.
+After changing source code, validate the latest revision whenever execution or testing is possible.
 
-If you modify the source after a successful test, you must validate the new version again.
+A previous successful run does not validate files that were modified afterwards. This also applies when workspace files are changed outside the agent between validation and completion or between session runs.
 
-Do not claim that code works unless the latest relevant version has actually passed local validation.
+If the runtime reports that the workspace changed after validation, inspect the current files when necessary and run the appropriate validation command again.
+
+Do not claim that code works unless the current relevant workspace revision has actually passed local validation.
 
 
 # Completion rules

@@ -340,6 +340,13 @@ class CodingAgent:
 
         self.state.reset()
 
+        # Bind runtime state to the actual initial filesystem snapshot.
+        # A fresh task still cannot finish until source has been written
+        # and that resulting revision has been validated.
+        self.state.observe_workspace_revision(
+            self._calculate_workspace_revision()
+        )
+
         system_prompt = (
             self._build_system_prompt()
         )
@@ -534,6 +541,26 @@ class CodingAgent:
             state_data
         )
 
+        persisted_revision = (
+            self.state.current_revision
+        )
+
+        actual_revision = (
+            self._calculate_workspace_revision()
+        )
+
+        workspace_changed = (
+            persisted_revision is not None
+            and persisted_revision != actual_revision
+        )
+
+        # Always trust the current filesystem over persisted metadata.
+        # If it changed, validated_revision intentionally remains bound
+        # to the old snapshot so the finish guard requires revalidation.
+        self.state.observe_workspace_revision(
+            actual_revision
+        )
+
         restored_step = (
             self.state.step
         )
@@ -553,6 +580,26 @@ class CodingAgent:
                 run_id=session_id
             )
         )
+
+        if workspace_changed:
+            feedback = (
+                "The workspace contents changed since this session "
+                "was last persisted. Previous validation evidence "
+                "is no longer sufficient; inspect the current files "
+                "and re-run validation before finishing."
+            )
+
+            self.history.add_runtime_feedback(
+                feedback
+            )
+
+            self.trace_logger.log_runtime_feedback(
+                step=restored_step,
+                feedback=feedback,
+                reason=(
+                    "workspace_changed_since_session"
+                ),
+            )
 
         next_step = (
             restored_step + 1
@@ -801,6 +848,13 @@ class CodingAgent:
                 )
 
                 if not parsed.tool_calls:
+
+                    # Re-read the filesystem at the exact finish boundary.
+                    # This catches manual edits or command-side changes that
+                    # happened after the last successful validation.
+                    self.state.observe_workspace_revision(
+                        self._calculate_workspace_revision()
+                    )
 
                     decision = (
                         self.termination_policy
@@ -1163,14 +1217,50 @@ class CodingAgent:
         )
 
         # ----------------------------------------------------
-        # Update AgentState
+        # Update AgentState + workspace revision
         # ----------------------------------------------------
+
+        workspace_revision = None
+
+        if tool_name in {
+            "write_file",
+            "edit_file",
+            "run_command",
+        }:
+            workspace_revision = (
+                self._calculate_workspace_revision()
+            )
+
+        validation_count_before = len(
+            self.state.validation_records
+        )
 
         self.state.record_tool_result(
             tool_name=tool_name,
             arguments=arguments,
             result=result_data,
+            workspace_revision=(
+                workspace_revision
+            ),
         )
+
+        if (
+            self.trace_logger is not None
+            and len(self.state.validation_records)
+            > validation_count_before
+        ):
+            record = (
+                self.state.validation_records[-1]
+            )
+
+            self.trace_logger.log(
+                "workspace_validation",
+                step=record.step,
+                revision=record.revision,
+                argv=record.argv,
+                purpose=record.purpose,
+                returncode=record.returncode,
+            )
 
         # ----------------------------------------------------
         # Feed observation back to LLM
@@ -1218,6 +1308,21 @@ class CodingAgent:
 
         self._print_tool_result(
             tool_result
+        )
+
+    # ========================================================
+    # Workspace revision
+    # ========================================================
+
+    def _calculate_workspace_revision(
+        self,
+    ) -> str:
+        """Return the current deterministic workspace fingerprint."""
+
+        return (
+            self.tool_registry
+            .workspace
+            .calculate_revision()
         )
 
     # ========================================================
