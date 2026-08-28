@@ -1,7 +1,7 @@
 from .registry import ToolRegistry
-from .schemas import TOOLS
+from .workspace import WorkspaceManager
 
 __all__ = [
     "ToolRegistry",
-    "TOOLS",
+    "WorkspaceManager",
 ]
