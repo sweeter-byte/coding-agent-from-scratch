@@ -111,3 +111,22 @@ def test_invalid_tool_arguments_return_structured_error(tmp_path: Path):
     assert result["ok"] is False
     assert result["tool"] == "write_file"
     assert "Invalid arguments" in result["error"]
+
+
+def test_run_command_schema_exposes_controlled_cwd_and_pytest_guidance(
+    tmp_path: Path,
+):
+    registry = ToolRegistry(tmp_path / "workspace")
+
+    run_schema = next(
+        schema
+        for schema in registry.get_schemas()
+        if schema["function"]["name"] == "run_command"
+    )
+
+    properties = run_schema["function"]["parameters"]["properties"]
+
+    assert "cwd" in properties
+    assert properties["cwd"]["default"] == "."
+    assert properties["cwd"]["type"] == "string"
+    assert "pytest" in run_schema["function"]["description"]

@@ -634,3 +634,159 @@ def test_agent_search_read_edit_validate_finish_flow(
     search_result = json.loads(search_result_message["content"])
     assert search_result["ok"] is True
     assert search_result["matches"][0]["path"] == "app.py"
+
+
+def test_agent_edit_pytest_fail_fix_pytest_pass_finish_flow(
+    monkeypatch,
+    tmp_path: Path,
+    agent_config,
+):
+    """
+    Exercise a realistic recovery loop in a project subdirectory:
+
+        read -> edit -> pytest fails -> edit -> pytest passes -> finish
+
+    The first failing pytest run must not validate the edited source.
+    The second successful pytest run validates the newest edit version.
+    """
+
+    project_dir = agent_config.workspace / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    source = project_dir / "app.py"
+    source.write_text(
+        "def greeting():\n"
+        "    return 'old'\n",
+        encoding="utf-8",
+    )
+
+    (project_dir / "test_app.py").write_text(
+        "from app import greeting\n"
+        "\n"
+        "def test_greeting():\n"
+        "    assert greeting() == 'new'\n",
+        encoding="utf-8",
+    )
+
+    fake_llm = FakeLLMClient(
+        [
+            response(
+                calls=[
+                    tool_call(
+                        "read-app",
+                        "read_file",
+                        {"path": "project/app.py"},
+                    )
+                ]
+            ),
+            # First edit is intentionally wrong so pytest fails.
+            response(
+                calls=[
+                    tool_call(
+                        "bad-edit",
+                        "edit_file",
+                        {
+                            "path": "project/app.py",
+                            "old_text": "    return 'old'",
+                            "new_text": "    return 'broken'",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "failing-pytest",
+                        "run_command",
+                        {
+                            "argv": ["python", "-m", "pytest", "-q"],
+                            "purpose": "test",
+                            "cwd": "project",
+                        },
+                    )
+                ]
+            ),
+            # Recover from the test output with a targeted second edit.
+            response(
+                calls=[
+                    tool_call(
+                        "good-edit",
+                        "edit_file",
+                        {
+                            "path": "project/app.py",
+                            "old_text": "    return 'broken'",
+                            "new_text": "    return 'new'",
+                        },
+                    )
+                ]
+            ),
+            response(
+                calls=[
+                    tool_call(
+                        "passing-pytest",
+                        "run_command",
+                        {
+                            "argv": ["python", "-m", "pytest", "-q"],
+                            "purpose": "test",
+                            "cwd": "project",
+                        },
+                    )
+                ]
+            ),
+            response(content="Fixed the code and all project tests pass."),
+        ]
+    )
+
+    trace_dir = tmp_path / "traces"
+
+    monkeypatch.setattr(
+        "agent.agent.TraceLogger",
+        lambda *, run_id: RealTraceLogger(
+            directory=trace_dir,
+            run_id=run_id,
+        ),
+    )
+
+    agent = CodingAgent(config=agent_config)
+    agent.llm_client = fake_llm
+    agent.session_store = SessionStore(tmp_path / "sessions")
+
+    result = agent.run(
+        "Update project/app.py so the existing pytest suite passes"
+    )
+
+    assert result == "Fixed the code and all project tests pass."
+    assert source.read_text(encoding="utf-8") == (
+        "def greeting():\n"
+        "    return 'new'\n"
+    )
+
+    assert agent.state.write_version == 2
+    assert agent.state.validated_version == 2
+    assert agent.state.latest_version_validated is True
+    assert agent.state.total_tool_calls == 5
+    assert agent.state.consecutive_errors == 0
+
+    history = agent.history.get_messages()
+
+    failed_message = next(
+        message
+        for message in history
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "failing-pytest"
+    )
+    failed_result = json.loads(failed_message["content"])
+    assert failed_result["ok"] is False
+    assert failed_result["returncode"] == 1
+    assert failed_result["cwd"] == "project"
+
+    passed_message = next(
+        message
+        for message in history
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "passing-pytest"
+    )
+    passed_result = json.loads(passed_message["content"])
+    assert passed_result["ok"] is True
+    assert passed_result["returncode"] == 0
+    assert passed_result["cwd"] == "project"

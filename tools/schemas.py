@@ -249,10 +249,11 @@ RUN_COMMAND_SCHEMA = {
     "function": {
         "name": "run_command",
         "description": (
-            "Run an allowed compiler, interpreter, generated "
-            "executable, or test command locally inside the "
-            "workspace. Provide argv as an array; shell "
-            "command strings and shell operators are not supported."
+            "Run a controlled local compiler, interpreter, generated "
+            "executable, or test/build command inside the workspace. "
+            "Supported workflows include Python scripts, pytest, "
+            "g++/clang++, CMake, and CTest. Commands are provided as "
+            "argv arrays; shells and shell operators are not supported."
         ),
         "parameters": {
             "type": "object",
@@ -264,8 +265,11 @@ RUN_COMMAND_SCHEMA = {
                     },
                     "minItems": 1,
                     "description": (
-                        "Command argument vector. Example: "
-                        '[\"g++\", \"main.cpp\", \"-o\", \"main\"]'
+                        "Command argument vector. Examples: "
+                        '["python", "app.py"], '
+                        '["python", "-m", "pytest", "-q"], '
+                        '["g++", "main.cpp", "-o", "main"], '
+                        '["cmake", "-S", ".", "-B", "build"].'
                     ),
                 },
                 "purpose": {
@@ -276,14 +280,15 @@ RUN_COMMAND_SCHEMA = {
                         "test",
                     ],
                     "description": (
-                        "Why this command is being executed."
+                        "Why this command is being executed. Use "
+                        "compile for compilation/build steps, run for "
+                        "executing a program, and test for validation."
                     ),
                 },
                 "stdin": {
                     "type": "string",
                     "description": (
-                        "Optional standard input supplied "
-                        "to the process."
+                        "Optional standard input supplied to the process."
                     ),
                     "default": "",
                 },
@@ -292,10 +297,18 @@ RUN_COMMAND_SCHEMA = {
                     "minimum": 1,
                     "maximum": 30,
                     "description": (
-                        "Maximum local execution time "
-                        "in seconds."
+                        "Maximum local execution time in seconds."
                     ),
                     "default": 20,
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Workspace-relative working directory for the "
+                        "command. It must exist and remain inside the "
+                        "workspace. Defaults to '.'."
+                    ),
+                    "default": ".",
                 },
             },
             "required": [
