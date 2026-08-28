@@ -130,3 +130,27 @@ def test_run_command_schema_exposes_controlled_cwd_and_pytest_guidance(
     assert properties["cwd"]["default"] == "."
     assert properties["cwd"]["type"] == "string"
     assert "pytest" in run_schema["function"]["description"]
+
+
+def test_registry_redacts_secret_like_command_output(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "show_secret.py").write_text(
+        "print('OPENAI_API_KEY=definitely-not-a-real-key')\n",
+        encoding="utf-8",
+    )
+    registry = ToolRegistry(root)
+
+    result = decode(
+        registry.execute(
+            "run_command",
+            {
+                "argv": ["python", "show_secret.py"],
+                "purpose": "run",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert "definitely-not-a-real-key" not in result["stdout"]
+    assert "OPENAI_API_KEY=[REDACTED]" in result["stdout"]

@@ -22,6 +22,7 @@ Agent Loop、上下文管理、工具执行、模型输出解析、终止策略�
 - 最新代码验证保护
 - Session 持久化与恢复
 - JSONL Runtime Trace
+- SensitiveDataPolicy：敏感路径拦截与凭据脱敏
 
 典型工作流：
 
@@ -96,7 +97,7 @@ python -m pytest -q
 当前测试集：
 
 ```text
-114 passed
+126 passed
 ```
 
 ## Project Structure
@@ -106,6 +107,7 @@ coding-agent-from-scratch/
 ├── agent/       # Agent Loop、上下文、状态、终止策略
 ├── tools/       # 文件工具与命令执行工具
 ├── storage/     # Session 与 Trace 持久化
+├── security/    # 敏感路径策略与凭据脱敏
 ├── prompts/     # System Prompt
 ├── tests/       # 单元测试与集成测试
 ├── workspace/   # 默认工作目录
@@ -127,3 +129,5 @@ Agent 默认只能操作指定 Workspace，并提供：
 - 执行超时
 - stdout / stderr 捕获
 - 敏感环境变量清理
+- `.env` / 私钥 / 云凭据等敏感路径拦截
+- Tool Result、Session、Trace 中的敏感文本脱敏

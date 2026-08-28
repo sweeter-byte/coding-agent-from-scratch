@@ -10,6 +10,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from security import SensitiveDataPolicy
+
 
 # ============================================================
 # Project paths
@@ -96,6 +98,7 @@ class SessionStore:
     def __init__(
         self,
         directory: str | Path | None = None,
+        sensitive_data_policy: SensitiveDataPolicy | None = None,
     ) -> None:
 
         if directory is None:
@@ -120,6 +123,11 @@ class SessionStore:
         self.directory.mkdir(
             parents=True,
             exist_ok=True,
+        )
+
+        self.sensitive_data_policy = (
+            sensitive_data_policy
+            or SensitiveDataPolicy()
         )
 
     # ========================================================
@@ -315,6 +323,14 @@ class SessionStore:
                 )
             ),
         }
+
+        # Session files are a durable persistence boundary. Redact
+        # credential-like values even if they entered the runtime from
+        # model output, command stdout/stderr, or user-provided text.
+        payload = (
+            self.sensitive_data_policy
+            .redact_data(payload)
+        )
 
         # ----------------------------------------------------
         # Atomic persistence

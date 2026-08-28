@@ -10,6 +10,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from security import SensitiveDataPolicy
+
 
 # ============================================================
 # Project paths
@@ -52,24 +54,16 @@ class TraceLogger:
         └── run_20260828_103015_a12b34cd.jsonl
     """
 
-    # Keys that should never be written directly into logs.
-    SENSITIVE_KEYS = {
-        "api_key",
-        "apikey",
-        "authorization",
-        "password",
-        "passwd",
-        "secret",
-        "access_token",
-        "refresh_token",
-        "token",
-    }
+    # Backward-compatible alias; detection is centralized in
+    # SensitiveDataPolicy.
+    SENSITIVE_KEYS = SensitiveDataPolicy.SENSITIVE_KEYS
 
     def __init__(
         self,
         directory: str | Path | None = None,
         run_id: str | None = None,
         max_string_length: int = 10000,
+        sensitive_data_policy: SensitiveDataPolicy | None = None,
     ) -> None:
 
         if directory is None:
@@ -104,6 +98,11 @@ class TraceLogger:
 
         self.max_string_length = (
             max_string_length
+        )
+
+        self.sensitive_data_policy = (
+            sensitive_data_policy
+            or SensitiveDataPolicy()
         )
 
         self.run_id = (
@@ -462,7 +461,7 @@ class TraceLogger:
 
         if (
             key is not None
-            and self._is_sensitive_key(
+            and self.sensitive_data_policy.is_sensitive_key(
                 key
             )
         ):
@@ -502,7 +501,9 @@ class TraceLogger:
             str,
         ):
             return self._truncate_string(
-                value
+                self.sensitive_data_policy.redact_text(
+                    value
+                )
             )
 
         # ----------------------------------------------------
@@ -514,7 +515,9 @@ class TraceLogger:
             Path,
         ):
             return self._truncate_string(
-                str(value)
+                self.sensitive_data_policy.redact_text(
+                    str(value)
+                )
             )
 
         # ----------------------------------------------------
@@ -614,7 +617,9 @@ class TraceLogger:
         # ----------------------------------------------------
 
         return self._truncate_string(
-            str(value)
+            self.sensitive_data_policy.redact_text(
+                str(value)
+            )
         )
 
     # ========================================================
@@ -626,33 +631,10 @@ class TraceLogger:
         cls,
         key: str,
     ) -> bool:
-
-        normalized = (
+        return SensitiveDataPolicy.is_sensitive_key(
             key
-            .strip()
-            .lower()
-            .replace("-", "_")
         )
 
-        if normalized in (
-            cls.SENSITIVE_KEYS
-        ):
-            return True
-
-        # Also catch names such as:
-        #
-        # openai_api_key
-        # qwen_access_token
-        #
-        for sensitive in (
-            cls.SENSITIVE_KEYS
-        ):
-            if normalized.endswith(
-                "_" + sensitive
-            ):
-                return True
-
-        return False
 
     # ========================================================
     # String truncation

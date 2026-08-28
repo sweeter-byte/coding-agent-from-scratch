@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from security import SensitiveDataPolicy
+
 from .command_tools import CommandTools
 from .file_tools import FileTools
 
@@ -60,6 +62,7 @@ class ToolRegistry:
     def __init__(
         self,
         workspace: str | Path,
+        sensitive_data_policy: SensitiveDataPolicy | None = None,
     ) -> None:
 
         self.workspace = (
@@ -68,9 +71,17 @@ class ToolRegistry:
             )
         )
 
+        self.sensitive_data_policy = (
+            sensitive_data_policy
+            or SensitiveDataPolicy()
+        )
+
         self.file_tools = (
             FileTools(
-                self.workspace
+                self.workspace,
+                sensitive_data_policy=(
+                    self.sensitive_data_policy
+                ),
             )
         )
 
@@ -243,7 +254,15 @@ class ToolRegistry:
                     tool=name,
                 )
 
-            return result
+            sanitized_payload = (
+                self.sensitive_data_policy
+                .redact_data(payload)
+            )
+
+            return json.dumps(
+                sanitized_payload,
+                ensure_ascii=False,
+            )
 
         except TypeError as exc:
             return self._error(

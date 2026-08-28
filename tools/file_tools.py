@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from security import SensitiveDataPolicy
+
 from .workspace import WorkspaceManager
 
 
@@ -44,6 +46,7 @@ class FileTools:
     def __init__(
         self,
         workspace: str | Path | WorkspaceManager,
+        sensitive_data_policy: SensitiveDataPolicy | None = None,
     ) -> None:
 
         if isinstance(
@@ -56,6 +59,11 @@ class FileTools:
             self.workspace = WorkspaceManager(
                 workspace
             )
+
+        self.sensitive_data_policy = (
+            sensitive_data_policy
+            or SensitiveDataPolicy()
+        )
 
         # Files created by this FileTools instance may be rewritten
         # without setting overwrite=True.
@@ -85,10 +93,14 @@ class FileTools:
         """
 
         try:
+            self._ensure_path_allowed(path)
+
             target = self.workspace.resolve_file(
                 path,
                 must_exist=True,
             )
+
+            self._ensure_resolved_path_allowed(target)
 
             self._validate_line_range(
                 start_line=start_line,
@@ -227,9 +239,13 @@ class FileTools:
                     "overwrite must be a boolean."
                 )
 
+            self._ensure_path_allowed(path)
+
             target = self.workspace.resolve_file(
                 path
             )
+
+            self._ensure_resolved_path_allowed(target)
 
             existed_before = target.exists()
 
@@ -333,10 +349,14 @@ class FileTools:
                     "new_text must differ from old_text."
                 )
 
+            self._ensure_path_allowed(path)
+
             target = self.workspace.resolve_file(
                 path,
                 must_exist=True,
             )
+
+            self._ensure_resolved_path_allowed(target)
 
             if target not in self._read_files:
                 return self._json(
@@ -517,9 +537,15 @@ class FileTools:
                 ),
             )
 
+            self._ensure_path_allowed(path)
+
             search_root = self.workspace.resolve(
                 path,
                 must_exist=True,
+            )
+
+            self._ensure_resolved_path_allowed(
+                search_root
             )
 
             if not (
@@ -543,6 +569,16 @@ class FileTools:
 
                     if not self.workspace.contains(
                         resolved
+                    ):
+                        skipped_files += 1
+                        continue
+
+                    relative = self.workspace.relative_path(
+                        resolved
+                    )
+
+                    if self.sensitive_data_policy.is_sensitive_path(
+                        relative
                     ):
                         skipped_files += 1
                         continue
@@ -690,12 +726,18 @@ class FileTools:
                 ),
             )
 
+            self._ensure_path_allowed(path)
+
             directory = (
                 self.workspace
                 .resolve_directory(
                     path,
                     must_exist=True,
                 )
+            )
+
+            self._ensure_resolved_path_allowed(
+                directory
             )
 
             iterator = (
@@ -730,6 +772,11 @@ class FileTools:
                             resolved
                         )
                     )
+
+                    if self.sensitive_data_policy.is_sensitive_path(
+                        relative
+                    ):
+                        continue
 
                 except (
                     OSError,
@@ -820,6 +867,29 @@ class FileTools:
                 file_names
             ):
                 yield current_path / file_name
+
+    def _ensure_path_allowed(
+        self,
+        path: str | Path,
+    ) -> None:
+        if self.sensitive_data_policy.is_sensitive_path(
+            path
+        ):
+            raise PermissionError(
+                "Sensitive path is blocked by runtime policy."
+            )
+
+    def _ensure_resolved_path_allowed(
+        self,
+        path: Path,
+    ) -> None:
+        relative = self.workspace.relative_path(
+            path
+        )
+
+        self._ensure_path_allowed(
+            relative
+        )
 
     @staticmethod
     def _validate_line_range(

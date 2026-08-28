@@ -133,3 +133,33 @@ def test_list_sessions_includes_lightweight_state(tmp_path: Path):
 
     assert sessions[0]["state"]["step"] == 5
     assert sessions[0]["state"]["write_version"] == 2
+
+
+def test_session_store_redacts_persisted_sensitive_values(tmp_path: Path):
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create_session(
+        metadata={
+            "task": "use OPENAI_API_KEY=definitely-not-a-real-key",
+            "api_key": "direct-secret",
+        }
+    )
+
+    store.save(
+        session_id,
+        messages=[
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": '{"token":"fake-session-value"}',
+            }
+        ],
+    )
+
+    data = store.load(session_id)
+    serialized = str(data)
+
+    assert "direct-secret" not in serialized
+    assert "definitely-not-a-real-key" not in serialized
+    assert "fake-session-value" not in serialized
+    assert data["metadata"]["api_key"] == "[REDACTED]"
+    assert "[REDACTED]" in data["messages"][0]["content"]

@@ -83,3 +83,21 @@ def test_trace_logger_records_session_resume(tmp_path: Path):
     assert record["data"]["restored_step"] == 3
     assert record["data"]["next_step"] == 4
     assert record["data"]["previous_status"] == "failed"
+
+
+def test_trace_logger_redacts_secrets_inside_plain_text_fields(tmp_path: Path):
+    logger = TraceLogger(
+        directory=tmp_path / "traces",
+        run_id="text-secret-run",
+    )
+
+    logger.log(
+        "tool_result",
+        content="OPENAI_API_KEY=definitely-not-a-real-key",
+    )
+
+    record = read_jsonl(logger.get_log_path())[0]
+    content = record["data"]["content"]
+
+    assert "definitely-not-a-real-key" not in content
+    assert "OPENAI_API_KEY=[REDACTED]" in content

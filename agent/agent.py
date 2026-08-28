@@ -44,6 +44,10 @@ from storage import (
     TraceLogger,
 )
 
+from security import (
+    SensitiveDataPolicy,
+)
+
 from tools.registry import (
     ToolRegistry,
 )
@@ -150,6 +154,14 @@ class CodingAgent:
         )
 
         # ----------------------------------------------------
+        # Sensitive-data policy
+        # ----------------------------------------------------
+
+        self.sensitive_data_policy = (
+            SensitiveDataPolicy()
+        )
+
+        # ----------------------------------------------------
         # Tool system
         # ----------------------------------------------------
 
@@ -157,7 +169,10 @@ class CodingAgent:
             ToolRegistry(
                 workspace=(
                     self.config.workspace
-                )
+                ),
+                sensitive_data_policy=(
+                    self.sensitive_data_policy
+                ),
             )
         )
 
@@ -983,6 +998,11 @@ class CodingAgent:
                 )
             )
 
+            tool_result = (
+                self.sensitive_data_policy
+                .redact_text(tool_result)
+            )
+
             result_data = (
                 self.error_handler
                 .parse_tool_result(
@@ -1054,7 +1074,8 @@ class CodingAgent:
 
         print(
             json.dumps(
-                arguments,
+                self.sensitive_data_policy
+                .redact_data(arguments),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -1119,6 +1140,15 @@ class CodingAgent:
                 - tool_start
             )
             * 1000
+        )
+
+        # ----------------------------------------------------
+        # Redact result before state/history/persistence
+        # ----------------------------------------------------
+
+        tool_result = (
+            self.sensitive_data_policy
+            .redact_text(tool_result)
         )
 
         # ----------------------------------------------------
@@ -1272,8 +1302,8 @@ class CodingAgent:
             "========================================"
         )
 
-    @staticmethod
     def _print_tool_result(
+        self,
         tool_result: str,
     ) -> None:
 
@@ -1284,5 +1314,6 @@ class CodingAgent:
         )
 
         print(
-            tool_result
+            self.sensitive_data_policy
+            .redact_text(tool_result)
         )

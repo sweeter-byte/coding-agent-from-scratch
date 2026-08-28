@@ -363,3 +363,76 @@ def test_edit_file_allows_deletion_with_empty_new_text(tmp_path: Path):
 
     assert result["ok"] is True
     assert target.read_text(encoding="utf-8") == "keep\n"
+
+
+# ============================================================
+# sensitive-data policy
+# ============================================================
+
+
+def test_read_file_blocks_sensitive_path(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".env").write_text(
+        "OPENAI_API_KEY=definitely-not-a-real-key\n",
+        encoding="utf-8",
+    )
+    tools = FileTools(root)
+
+    result = decode(tools.read_file(".env"))
+
+    assert result["ok"] is False
+    assert "Sensitive path" in result["error"]
+
+
+def test_write_file_blocks_sensitive_path_but_allows_env_example(tmp_path: Path):
+    tools = FileTools(tmp_path / "workspace")
+
+    blocked = decode(
+        tools.write_file(".env", "OPENAI_API_KEY=secret\n")
+    )
+    allowed = decode(
+        tools.write_file(
+            ".env.example",
+            "OPENAI_API_KEY=your-key-here\n",
+        )
+    )
+
+    assert blocked["ok"] is False
+    assert "Sensitive path" in blocked["error"]
+    assert allowed["ok"] is True
+
+
+def test_list_files_hides_sensitive_entries(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".env").write_text("secret\n", encoding="utf-8")
+    (root / ".env.example").write_text("placeholder\n", encoding="utf-8")
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / "id_ed25519").write_text("secret\n", encoding="utf-8")
+    (root / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    tools = FileTools(root)
+
+    result = decode(tools.list_files())
+    paths = {entry["path"] for entry in result["entries"]}
+
+    assert ".env" not in paths
+    assert ".ssh" not in paths
+    assert ".ssh/id_ed25519" not in paths
+    assert ".env.example" in paths
+    assert "main.py" in paths
+
+
+def test_search_text_skips_sensitive_files(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".env").write_text("needle=secret\n", encoding="utf-8")
+    (root / "safe.txt").write_text("needle=safe\n", encoding="utf-8")
+    tools = FileTools(root)
+
+    result = decode(tools.search_text("needle"))
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["matches"][0]["path"] == "safe.txt"
+    assert result["skipped_files"] >= 1
