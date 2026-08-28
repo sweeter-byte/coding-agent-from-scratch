@@ -1,12 +1,43 @@
 import json
 import platform
 
-from openai import OpenAI
+from .config import (
+    AgentConfig,
+    PROJECT_ROOT,
+)
 
-from .config import AgentConfig, PROJECT_ROOT
+from .context import (
+    ContextManager,
+)
 
-from tools.registry import ToolRegistry
-from tools.schemas import TOOLS
+from .error_handler import (
+    ErrorHandler,
+)
+
+from .history import (
+    ConversationHistory,
+)
+
+from .llm_client import (
+    LLMClient,
+)
+
+from .parser import (
+    ModelOutputError,
+    ResponseParser,
+)
+
+from .state import (
+    AgentState,
+)
+
+from .termination import (
+    TerminationPolicy,
+)
+
+from tools.registry import (
+    ToolRegistry,
+)
 
 
 # ============================================================
@@ -15,9 +46,9 @@ from tools.schemas import TOOLS
 
 def load_system_prompt() -> str:
     """
-    Load the system prompt from:
+    Load:
 
-    prompts/system_prompt.md
+        prompts/system_prompt.md
     """
 
     prompt_path = (
@@ -28,7 +59,8 @@ def load_system_prompt() -> str:
 
     if not prompt_path.exists():
         raise FileNotFoundError(
-            f"System prompt not found: {prompt_path}"
+            "System prompt not found: "
+            f"{prompt_path}"
         )
 
     return prompt_path.read_text(
@@ -42,16 +74,35 @@ def load_system_prompt() -> str:
 
 class CodingAgent:
     """
-    Minimal autonomous coding agent.
+    Autonomous coding-agent orchestrator.
 
-    Responsibilities:
+    CodingAgent itself only coordinates the main loop.
 
-    1. Maintain conversation history.
-    2. Call the LLM.
-    3. Parse tool calls.
-    4. Dispatch tools through ToolRegistry.
-    5. Feed tool results back to the LLM.
-    6. Decide when the agent is allowed to finish.
+    Important logic is delegated to independent modules:
+
+    - ConversationHistory
+        complete local history
+
+    - ContextManager
+        model input context selection
+
+    - LLMClient
+        model API access
+
+    - ResponseParser
+        model-output parsing
+
+    - AgentState
+        runtime state
+
+    - TerminationPolicy
+        loop termination rules
+
+    - ErrorHandler
+        retries and structured errors
+
+    - ToolRegistry
+        local tool dispatch
     """
 
     def __init__(
@@ -59,34 +110,106 @@ class CodingAgent:
         workspace: str = "workspace",
         max_steps: int = 12,
         config: AgentConfig | None = None,
-    ):
+    ) -> None:
+
         # ----------------------------------------------------
         # Configuration
         # ----------------------------------------------------
 
         if config is None:
-            config = AgentConfig.from_env(
-                workspace=workspace,
-                max_steps=max_steps,
+            config = (
+                AgentConfig.from_env(
+                    workspace=workspace,
+                    max_steps=max_steps,
+                )
             )
 
         self.config = config
 
         # ----------------------------------------------------
-        # Qwen client
+        # Model
         # ----------------------------------------------------
 
-        self.client = OpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
+        self.llm_client = LLMClient(
+            config=self.config
         )
 
         # ----------------------------------------------------
         # Tool system
         # ----------------------------------------------------
 
-        self.tool_registry = ToolRegistry(
-            workspace=self.config.workspace,
+        self.tool_registry = (
+            ToolRegistry(
+                workspace=(
+                    self.config.workspace
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # Conversation history
+        # ----------------------------------------------------
+
+        self.history = (
+            ConversationHistory()
+        )
+
+        # ----------------------------------------------------
+        # Context management
+        # ----------------------------------------------------
+
+        self.context_manager = (
+            ContextManager(
+                max_context_messages=(
+                    self.config
+                    .max_context_messages
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # Model output parser
+        # ----------------------------------------------------
+
+        self.response_parser = (
+            ResponseParser()
+        )
+
+        # ----------------------------------------------------
+        # Runtime state
+        # ----------------------------------------------------
+
+        self.state = (
+            AgentState()
+        )
+
+        # ----------------------------------------------------
+        # Termination policy
+        # ----------------------------------------------------
+
+        self.termination_policy = (
+            TerminationPolicy(
+                max_steps=(
+                    self.config.max_steps
+                ),
+                max_consecutive_errors=(
+                    self.config
+                    .max_consecutive_errors
+                ),
+            )
+        )
+
+        # ----------------------------------------------------
+        # Error handling
+        # ----------------------------------------------------
+
+        self.error_handler = (
+            ErrorHandler(
+                max_model_retries=(
+                    self.config
+                    .max_model_retries
+                )
+            )
         )
 
         # ----------------------------------------------------
@@ -95,93 +218,6 @@ class CodingAgent:
 
         self.system_prompt = (
             load_system_prompt()
-        )
-
-    # ========================================================
-    # Assistant message conversion
-    # ========================================================
-
-    def _assistant_message_to_dict(
-        self,
-        message,
-    ) -> dict:
-        """
-        Convert the message returned by the OpenAI-compatible
-        SDK into a plain dictionary.
-
-        The conversation history is maintained locally by
-        this agent rather than by the API service.
-        """
-
-        result = {
-            "role": "assistant",
-            "content": message.content or "",
-        }
-
-        if message.tool_calls:
-            result["tool_calls"] = []
-
-            for tool_call in message.tool_calls:
-                result["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": (
-                                tool_call.function.name
-                            ),
-                            "arguments": (
-                                tool_call.function.arguments
-                            ),
-                        },
-                    }
-                )
-
-        return result
-
-    # ========================================================
-    # Tool execution
-    # ========================================================
-
-    def _execute_tool(
-        self,
-        name: str,
-        arguments: dict,
-    ) -> str:
-        """
-        Execute a tool through ToolRegistry.
-        """
-
-        return self.tool_registry.execute(
-            name=name,
-            arguments=arguments,
-        )
-
-    # ========================================================
-    # Runtime feedback
-    # ========================================================
-
-    @staticmethod
-    def _append_runtime_feedback(
-        messages: list,
-        content: str,
-    ) -> None:
-        """
-        Add feedback generated by the agent runtime itself
-        back into the conversation.
-
-        This is different from a tool result:
-        it represents a constraint enforced by our agent.
-        """
-
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "[Agent runtime feedback]\n"
-                    + content
-                ),
-            }
         )
 
     # ========================================================
@@ -195,329 +231,232 @@ class CodingAgent:
         """
         Execute one coding task.
 
-        Core loop:
+        Main loop:
 
-        user task
+        context
             ↓
-        LLM decision
+        model
             ↓
-        tool call
+        parsed response
             ↓
-        local tool execution
+        tool calls
             ↓
-        observation
+        local execution
             ↓
-        LLM decision
+        observations
+            ↓
+        next context
             ↓
         ...
             ↓
-        final answer
+        termination policy
         """
 
-        current_os = platform.system()
+        if not user_task.strip():
+            raise ValueError(
+                "user_task cannot be empty."
+            )
+
+        # ----------------------------------------------------
+        # Reset runtime state
+        # ----------------------------------------------------
+
+        self.state.reset()
+
+        # ----------------------------------------------------
+        # Initialize conversation
+        # ----------------------------------------------------
 
         system_prompt = (
-            self.system_prompt
-            + "\n\n"
-            + f"Current operating system: {current_os}"
+            self._build_system_prompt()
+        )
+
+        self.history.reset(
+            system_prompt=system_prompt,
+            user_task=user_task,
         )
 
         # ----------------------------------------------------
-        # Conversation history
+        # Obtain schemas through ToolRegistry
         # ----------------------------------------------------
 
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_task,
-            },
-        ]
+        tool_schemas = (
+            self.tool_registry
+            .get_schemas()
+        )
 
-        # ----------------------------------------------------
-        # Runtime state
-        # ----------------------------------------------------
-
-        # Number of successful source-code writes.
-        #
-        # Example:
-        #
-        # first generated version -> 1
-        # fixed version           -> 2
-        #
-        write_version = 0
-
-        # Which source-code version has successfully
-        # passed runtime validation.
-        validated_version = -1
-
-        # ----------------------------------------------------
-        # Agent Loop
-        # ----------------------------------------------------
+        # ====================================================
+        # Agent loop
+        # ====================================================
 
         for step in range(
             1,
             self.config.max_steps + 1,
         ):
-            print()
-            print(
-                "========================================"
-            )
-            print(
-                f"Agent Step "
-                f"{step}/{self.config.max_steps}"
-            )
-            print(
-                "========================================"
+
+            self.state.begin_step(
+                step
             )
 
-            # =================================================
-            # Ask Qwen what to do next
-            # =================================================
+            self._print_step_header(
+                step
+            )
+
+            # ------------------------------------------------
+            # Build current LLM context
+            # ------------------------------------------------
+
+            context = (
+                self.context_manager
+                .build(
+                    self.history
+                )
+            )
+
+            # ------------------------------------------------
+            # Call model with retry policy
+            # ------------------------------------------------
 
             response = (
-                self.client
-                .chat
-                .completions
-                .create(
-                    model=self.config.model,
-                    messages=messages,
-                    tools=TOOLS,
-                    tool_choice="auto",
+                self.error_handler
+                .run_model_call(
+                    lambda: (
+                        self.llm_client
+                        .create_completion(
+                            messages=context,
+                            tools=tool_schemas,
+                        )
+                    )
                 )
             )
 
-            assistant_message = (
-                response
-                .choices[0]
-                .message
-            )
+            # ------------------------------------------------
+            # Parse model output
+            # ------------------------------------------------
 
-            # Save assistant response into
-            # our locally maintained history.
-            messages.append(
-                self._assistant_message_to_dict(
-                    assistant_message
+            try:
+                parsed = (
+                    self.response_parser
+                    .parse(
+                        response
+                    )
                 )
-            )
 
-            tool_calls = (
-                assistant_message.tool_calls
-            )
+            except ModelOutputError as exc:
 
-            # =================================================
-            # No tool call:
-            # the LLM wants to finish
-            # =================================================
+                self.state.record_runtime_error(
+                    str(exc)
+                )
 
-            if not tool_calls:
-
-                # ---------------------------------------------
-                # Guard 1:
-                # Source file must have been created
-                # ---------------------------------------------
-
-                if write_version == 0:
-                    print(
-                        "[Runtime Guard] "
-                        "Model attempted to finish "
-                        "without creating a source file."
+                self.history.add_runtime_feedback(
+                    (
+                        "The previous model response "
+                        "could not be parsed by the "
+                        "local runtime: "
+                        f"{exc}. "
+                        "Please try again."
                     )
+                )
 
-                    self._append_runtime_feedback(
-                        messages,
-                        (
-                            "You have not created the "
-                            "requested source file yet. "
-                            "Continue the task using tools."
-                        ),
+                runtime_decision = (
+                    self.termination_policy
+                    .evaluate_runtime(
+                        self.state
                     )
-
-                    continue
-
-                # ---------------------------------------------
-                # Guard 2:
-                # Latest version must have been run
-                # ---------------------------------------------
+                )
 
                 if (
-                    validated_version
-                    != write_version
+                    runtime_decision
+                    .should_stop
                 ):
-                    print(
-                        "[Runtime Guard] "
-                        "Latest source version has not "
-                        "passed runtime validation."
+                    raise RuntimeError(
+                        runtime_decision
+                        .feedback
                     )
 
-                    self._append_runtime_feedback(
-                        messages,
-                        (
-                            "The latest source-code "
-                            "version has not yet passed "
-                            "successful runtime validation. "
-                            "Continue using run_command."
-                        ),
+                continue
+
+            # ------------------------------------------------
+            # Save assistant message
+            # ------------------------------------------------
+
+            self.history.add_assistant_message(
+                parsed.assistant_message
+            )
+
+            # =================================================
+            # No tool calls:
+            # model attempts to finish
+            # =================================================
+
+            if not parsed.tool_calls:
+
+                decision = (
+                    self.termination_policy
+                    .evaluate_finish_request(
+                        self.state
                     )
-
-                    continue
-
-                # ---------------------------------------------
-                # Agent may finish
-                # ---------------------------------------------
-
-                return (
-                    assistant_message.content
-                    or "Task completed successfully."
                 )
+
+                # --------------------------------------------
+                # Agent accepts completion
+                # --------------------------------------------
+
+                if decision.can_finish:
+                    return (
+                        parsed.content
+                        or (
+                            "Task completed "
+                            "successfully."
+                        )
+                    )
+
+                # --------------------------------------------
+                # Agent rejects premature completion
+                # --------------------------------------------
+
+                print()
+
+                print(
+                    "[Runtime Guard] "
+                    + decision.reason
+                )
+
+                self.history.add_runtime_feedback(
+                    decision.feedback
+                )
+
+                continue
 
             # =================================================
             # Execute tool calls
             # =================================================
 
-            for tool_call in tool_calls:
+            for tool_call in (
+                parsed.tool_calls
+            ):
 
-                tool_name = (
-                    tool_call.function.name
+                self._handle_tool_call(
+                    tool_call=tool_call
                 )
 
-                print()
-                print(
-                    f"[Tool Call] {tool_name}"
+            # ------------------------------------------------
+            # Runtime termination check
+            # ------------------------------------------------
+
+            runtime_decision = (
+                self.termination_policy
+                .evaluate_runtime(
+                    self.state
                 )
+            )
 
-                # ---------------------------------------------
-                # Parse tool arguments
-                # ---------------------------------------------
-
-                try:
-                    arguments = json.loads(
-                        tool_call
-                        .function
-                        .arguments
-                    )
-
-                except json.JSONDecodeError as e:
-                    tool_result = json.dumps(
-                        {
-                            "ok": False,
-                            "error": (
-                                "Invalid JSON arguments "
-                                "generated by the model: "
-                                + str(e)
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
-
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": (
-                                tool_call.id
-                            ),
-                            "content": tool_result,
-                        }
-                    )
-
-                    continue
-
-                print(
-                    json.dumps(
-                        arguments,
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                )
-
-                # ---------------------------------------------
-                # Execute tool locally
-                # ---------------------------------------------
-
-                try:
-                    tool_result = (
-                        self._execute_tool(
-                            name=tool_name,
-                            arguments=arguments,
-                        )
-                    )
-
-                except Exception as e:
-                    tool_result = json.dumps(
-                        {
-                            "ok": False,
-                            "error": str(e),
-                        },
-                        ensure_ascii=False,
-                    )
-
-                print()
-                print(
-                    "[Tool Result]"
-                )
-                print(
-                    tool_result
-                )
-
-                # ---------------------------------------------
-                # Parse result for runtime state
-                # ---------------------------------------------
-
-                try:
-                    result_data = json.loads(
-                        tool_result
-                    )
-
-                except json.JSONDecodeError:
-                    result_data = {
-                        "ok": False,
-                    }
-
-                # ---------------------------------------------
-                # Successful file write
-                # ---------------------------------------------
-
-                if (
-                    tool_name == "write_file"
-                    and result_data.get("ok")
-                ):
-                    write_version += 1
-
-                # ---------------------------------------------
-                # Successful runtime validation
-                # ---------------------------------------------
-
-                if (
-                    tool_name == "run_command"
-                    and result_data.get("ok")
-                ):
-                    purpose = arguments.get(
-                        "purpose"
-                    )
-
-                    if purpose in {
-                        "run",
-                        "test",
-                    }:
-                        validated_version = (
-                            write_version
-                        )
-
-                # ---------------------------------------------
-                # Feed observation back to Qwen
-                # ---------------------------------------------
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": (
-                            tool_call.id
-                        ),
-                        "content": tool_result,
-                    }
+            if (
+                runtime_decision
+                .should_stop
+            ):
+                raise RuntimeError(
+                    runtime_decision.feedback
                 )
 
         # ====================================================
@@ -525,7 +464,233 @@ class CodingAgent:
         # ====================================================
 
         raise RuntimeError(
-            "Agent reached the maximum number "
-            f"of steps ({self.config.max_steps}) "
-            "without completing the task."
+            self.termination_policy
+            .max_steps_error()
+        )
+
+    # ========================================================
+    # Tool-call handling
+    # ========================================================
+
+    def _handle_tool_call(
+        self,
+        tool_call,
+    ) -> None:
+
+        tool_name = (
+            tool_call.name
+        )
+
+        print()
+
+        print(
+            f"[Tool Call] {tool_name}"
+        )
+
+        # ====================================================
+        # Invalid model-generated arguments
+        # ====================================================
+
+        if not tool_call.is_valid:
+
+            tool_result = (
+                self.error_handler
+                .build_tool_error(
+                    error=(
+                        tool_call.error
+                        or (
+                            "Invalid "
+                            "tool call."
+                        )
+                    ),
+                    tool_name=(
+                        tool_name
+                    ),
+                )
+            )
+
+            result_data = (
+                self.error_handler
+                .parse_tool_result(
+                    tool_result
+                )
+            )
+
+            # -----------------------------------------------
+            # Update runtime state
+            # -----------------------------------------------
+
+            self.state.record_tool_result(
+                tool_name=tool_name,
+                arguments={},
+                result=result_data,
+            )
+
+            # -----------------------------------------------
+            # Feed observation back to model
+            # -----------------------------------------------
+
+            self.history.add_tool_result(
+                tool_call_id=(
+                    tool_call.id
+                ),
+                content=(
+                    tool_result
+                ),
+            )
+
+            self._print_tool_result(
+                tool_result
+            )
+
+            return
+
+        # ====================================================
+        # Valid tool call
+        # ====================================================
+
+        arguments = (
+            tool_call.arguments
+            or {}
+        )
+
+        print(
+            json.dumps(
+                arguments,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+        # ----------------------------------------------------
+        # Local tool execution
+        # ----------------------------------------------------
+
+        try:
+            tool_result = (
+                self.tool_registry
+                .execute(
+                    name=(
+                        tool_name
+                    ),
+                    arguments=(
+                        arguments
+                    ),
+                )
+            )
+
+        except Exception as exc:
+            # ToolRegistry already handles ordinary
+            # tool errors.
+            #
+            # This extra boundary prevents an unexpected
+            # registry bug from crashing the loop without
+            # producing a structured observation.
+
+            tool_result = (
+                self.error_handler
+                .build_tool_error(
+                    error=str(exc),
+                    tool_name=(
+                        tool_name
+                    ),
+                )
+            )
+
+        # ----------------------------------------------------
+        # Parse structured tool result
+        # ----------------------------------------------------
+
+        result_data = (
+            self.error_handler
+            .parse_tool_result(
+                tool_result
+            )
+        )
+
+        # ----------------------------------------------------
+        # Update AgentState
+        # ----------------------------------------------------
+
+        self.state.record_tool_result(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result_data,
+        )
+
+        # ----------------------------------------------------
+        # Feed observation back to LLM
+        # ----------------------------------------------------
+
+        self.history.add_tool_result(
+            tool_call_id=(
+                tool_call.id
+            ),
+            content=(
+                tool_result
+            ),
+        )
+
+        self._print_tool_result(
+            tool_result
+        )
+
+    # ========================================================
+    # System prompt
+    # ========================================================
+
+    def _build_system_prompt(
+        self,
+    ) -> str:
+
+        current_os = (
+            platform.system()
+        )
+
+        return (
+            self.system_prompt
+            + "\n\n"
+            + (
+                "Current operating system: "
+                f"{current_os}"
+            )
+        )
+
+    # ========================================================
+    # CLI output
+    # ========================================================
+
+    def _print_step_header(
+        self,
+        step: int,
+    ) -> None:
+
+        print()
+
+        print(
+            "========================================"
+        )
+
+        print(
+            f"Agent Step "
+            f"{step}/{self.config.max_steps}"
+        )
+
+        print(
+            "========================================"
+        )
+
+    @staticmethod
+    def _print_tool_result(
+        tool_result: str,
+    ) -> None:
+
+        print()
+
+        print(
+            "[Tool Result]"
+        )
+
+        print(
+            tool_result
         )
