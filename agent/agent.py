@@ -1,6 +1,8 @@
 import json
 import platform
 
+from time import perf_counter
+
 from .config import (
     AgentConfig,
     PROJECT_ROOT,
@@ -24,6 +26,7 @@ from .llm_client import (
 
 from .parser import (
     ModelOutputError,
+    ParsedToolCall,
     ResponseParser,
 )
 
@@ -33,6 +36,11 @@ from .state import (
 
 from .termination import (
     TerminationPolicy,
+)
+
+from storage import (
+    SessionStore,
+    TraceLogger,
 )
 
 from tools.registry import (
@@ -76,15 +84,15 @@ class CodingAgent:
     """
     Autonomous coding-agent orchestrator.
 
-    CodingAgent itself only coordinates the main loop.
+    CodingAgent itself coordinates the agent loop.
 
-    Important logic is delegated to independent modules:
+    Core responsibilities are delegated to independent modules:
 
     - ConversationHistory
-        complete local history
+        complete in-memory conversation history
 
     - ContextManager
-        model input context selection
+        model-input context selection
 
     - LLMClient
         model API access
@@ -103,6 +111,12 @@ class CodingAgent:
 
     - ToolRegistry
         local tool dispatch
+
+    - SessionStore
+        durable session persistence
+
+    - TraceLogger
+        runtime observability and debugging traces
     """
 
     def __init__(
@@ -213,6 +227,28 @@ class CodingAgent:
         )
 
         # ----------------------------------------------------
+        # Persistent session storage
+        # ----------------------------------------------------
+
+        self.session_store = (
+            SessionStore()
+        )
+
+        # A new TraceLogger is created for every run(),
+        # because every task should have an independent trace.
+        self.trace_logger: (
+            TraceLogger | None
+        ) = None
+
+        self.session_id: (
+            str | None
+        ) = None
+
+        self.current_task: (
+            str | None
+        ) = None
+
+        # ----------------------------------------------------
         # Prompt
         # ----------------------------------------------------
 
@@ -233,29 +269,35 @@ class CodingAgent:
 
         Main loop:
 
-        context
-            ↓
-        model
-            ↓
-        parsed response
-            ↓
-        tool calls
-            ↓
-        local execution
-            ↓
-        observations
-            ↓
-        next context
-            ↓
-        ...
-            ↓
-        termination policy
+            initialize session
+                    ↓
+                context
+                    ↓
+                 model
+                    ↓
+            parsed response
+                    ↓
+               tool calls
+                    ↓
+            local execution
+                    ↓
+              observations
+                    ↓
+           persist + trace
+                    ↓
+             next context
+                    ↓
+                   ...
+                    ↓
+          termination policy
         """
 
         if not user_task.strip():
             raise ValueError(
                 "user_task cannot be empty."
             )
+
+        self.current_task = user_task
 
         # ----------------------------------------------------
         # Reset runtime state
@@ -277,86 +319,331 @@ class CodingAgent:
         )
 
         # ----------------------------------------------------
-        # Obtain schemas through ToolRegistry
+        # Create persistent session
         # ----------------------------------------------------
 
-        tool_schemas = (
-            self.tool_registry
-            .get_schemas()
+        self.session_id = (
+            self.session_store
+            .create_session(
+                metadata={
+                    "task": user_task,
+                    "model": (
+                        self.config.model
+                    ),
+                    "workspace": str(
+                        self.config.workspace
+                    ),
+                    "status": "running",
+                }
+            )
         )
 
-        # ====================================================
-        # Agent loop
-        # ====================================================
+        # ----------------------------------------------------
+        # Trace uses the same ID as the session
+        # ----------------------------------------------------
 
-        for step in range(
-            1,
-            self.config.max_steps + 1,
-        ):
+        self.trace_logger = (
+            TraceLogger(
+                run_id=self.session_id
+            )
+        )
 
-            self.state.begin_step(
-                step
+        # ----------------------------------------------------
+        # Persist initial history immediately
+        # ----------------------------------------------------
+
+        self._save_session(
+            status="running"
+        )
+
+        self.trace_logger.log_agent_start(
+            task=user_task,
+            model=self.config.model,
+            workspace=(
+                self.config.workspace
+            ),
+        )
+
+        try:
+            # ------------------------------------------------
+            # Obtain schemas through ToolRegistry
+            # ------------------------------------------------
+
+            tool_schemas = (
+                self.tool_registry
+                .get_schemas()
             )
 
-            self._print_step_header(
-                step
-            )
+            # =================================================
+            # Agent loop
+            # =================================================
 
-            # ------------------------------------------------
-            # Build current LLM context
-            # ------------------------------------------------
+            for step in range(
+                1,
+                self.config.max_steps + 1,
+            ):
 
-            context = (
-                self.context_manager
-                .build(
-                    self.history
+                self.state.begin_step(
+                    step
                 )
-            )
 
-            # ------------------------------------------------
-            # Call model with retry policy
-            # ------------------------------------------------
+                self._print_step_header(
+                    step
+                )
 
-            response = (
-                self.error_handler
-                .run_model_call(
-                    lambda: (
-                        self.llm_client
-                        .create_completion(
-                            messages=context,
-                            tools=tool_schemas,
+                self.trace_logger.log_agent_step(
+                    step=step
+                )
+
+                # --------------------------------------------
+                # Build current LLM context
+                # --------------------------------------------
+
+                context = (
+                    self.context_manager
+                    .build(
+                        self.history
+                    )
+                )
+
+                # --------------------------------------------
+                # Trace model request
+                # --------------------------------------------
+
+                self.trace_logger.log_model_call(
+                    step=step,
+                    model=(
+                        self.config.model
+                    ),
+                    message_count=len(
+                        context
+                    ),
+                    tool_count=len(
+                        tool_schemas
+                    ),
+                )
+
+                # --------------------------------------------
+                # Call model
+                # --------------------------------------------
+
+                model_start = (
+                    perf_counter()
+                )
+
+                response = (
+                    self.error_handler
+                    .run_model_call(
+                        lambda: (
+                            self.llm_client
+                            .create_completion(
+                                messages=context,
+                                tools=tool_schemas,
+                            )
                         )
                     )
                 )
-            )
 
-            # ------------------------------------------------
-            # Parse model output
-            # ------------------------------------------------
-
-            try:
-                parsed = (
-                    self.response_parser
-                    .parse(
-                        response
-                    )
-                )
-
-            except ModelOutputError as exc:
-
-                self.state.record_runtime_error(
-                    str(exc)
-                )
-
-                self.history.add_runtime_feedback(
+                model_duration_ms = (
                     (
+                        perf_counter()
+                        - model_start
+                    )
+                    * 1000
+                )
+
+                # --------------------------------------------
+                # Parse model output
+                # --------------------------------------------
+
+                try:
+                    parsed = (
+                        self.response_parser
+                        .parse(
+                            response
+                        )
+                    )
+
+                except ModelOutputError as exc:
+
+                    self.state.record_runtime_error(
+                        str(exc)
+                    )
+
+                    self.trace_logger.log_error(
+                        error=str(exc),
+                        source="response_parser",
+                        step=step,
+                        recoverable=True,
+                    )
+
+                    feedback = (
                         "The previous model response "
                         "could not be parsed by the "
                         "local runtime: "
                         f"{exc}. "
                         "Please try again."
                     )
+
+                    self.history.add_runtime_feedback(
+                        feedback
+                    )
+
+                    self.trace_logger.log_runtime_feedback(
+                        step=step,
+                        feedback=feedback,
+                        reason=(
+                            "model_output_parse_error"
+                        ),
+                    )
+
+                    self._save_session(
+                        status="running"
+                    )
+
+                    runtime_decision = (
+                        self.termination_policy
+                        .evaluate_runtime(
+                            self.state
+                        )
+                    )
+
+                    if (
+                        runtime_decision
+                        .should_stop
+                    ):
+                        raise RuntimeError(
+                            runtime_decision
+                            .feedback
+                        )
+
+                    continue
+
+                # --------------------------------------------
+                # Trace successful model response
+                # --------------------------------------------
+
+                usage = getattr(
+                    response,
+                    "usage",
+                    None,
                 )
+
+                self.trace_logger.log_model_response(
+                    step=step,
+                    content=(
+                        parsed.content
+                    ),
+                    tool_call_count=len(
+                        parsed.tool_calls
+                    ),
+                    usage=usage,
+                    duration_ms=(
+                        model_duration_ms
+                    ),
+                )
+
+                # --------------------------------------------
+                # Save assistant message to history
+                # --------------------------------------------
+
+                self.history.add_assistant_message(
+                    parsed.assistant_message
+                )
+
+                # Persist immediately.
+                #
+                # Even if execution crashes before tool execution,
+                # the model response itself is already preserved.
+                self._save_session(
+                    status="running"
+                )
+
+                # =================================================
+                # No tool calls:
+                # model attempts to finish
+                # =================================================
+
+                if not parsed.tool_calls:
+
+                    decision = (
+                        self.termination_policy
+                        .evaluate_finish_request(
+                            self.state
+                        )
+                    )
+
+                    # ----------------------------------------
+                    # Runtime accepts completion
+                    # ----------------------------------------
+
+                    if decision.can_finish:
+
+                        final_result = (
+                            parsed.content
+                            or (
+                                "Task completed "
+                                "successfully."
+                            )
+                        )
+
+                        self.trace_logger.log_agent_finish(
+                            step=step,
+                            result=final_result,
+                        )
+
+                        self._save_session(
+                            status="completed"
+                        )
+
+                        return final_result
+
+                    # ----------------------------------------
+                    # Runtime rejects premature completion
+                    # ----------------------------------------
+
+                    print()
+
+                    print(
+                        "[Runtime Guard] "
+                        + decision.reason
+                    )
+
+                    self.history.add_runtime_feedback(
+                        decision.feedback
+                    )
+
+                    self.trace_logger.log_runtime_feedback(
+                        step=step,
+                        feedback=(
+                            decision.feedback
+                        ),
+                        reason=(
+                            decision.reason
+                        ),
+                    )
+
+                    self._save_session(
+                        status="running"
+                    )
+
+                    continue
+
+                # =================================================
+                # Execute tool calls
+                # =================================================
+
+                for tool_call in (
+                    parsed.tool_calls
+                ):
+
+                    self._handle_tool_call(
+                        tool_call=tool_call
+                    )
+
+                # --------------------------------------------
+                # Runtime termination check
+                # --------------------------------------------
 
                 runtime_decision = (
                     self.termination_policy
@@ -374,99 +661,67 @@ class CodingAgent:
                         .feedback
                     )
 
-                continue
-
-            # ------------------------------------------------
-            # Save assistant message
-            # ------------------------------------------------
-
-            self.history.add_assistant_message(
-                parsed.assistant_message
-            )
-
             # =================================================
-            # No tool calls:
-            # model attempts to finish
+            # Maximum-step termination
             # =================================================
 
-            if not parsed.tool_calls:
-
-                decision = (
-                    self.termination_policy
-                    .evaluate_finish_request(
-                        self.state
-                    )
-                )
-
-                # --------------------------------------------
-                # Agent accepts completion
-                # --------------------------------------------
-
-                if decision.can_finish:
-                    return (
-                        parsed.content
-                        or (
-                            "Task completed "
-                            "successfully."
-                        )
-                    )
-
-                # --------------------------------------------
-                # Agent rejects premature completion
-                # --------------------------------------------
-
-                print()
-
-                print(
-                    "[Runtime Guard] "
-                    + decision.reason
-                )
-
-                self.history.add_runtime_feedback(
-                    decision.feedback
-                )
-
-                continue
-
-            # =================================================
-            # Execute tool calls
-            # =================================================
-
-            for tool_call in (
-                parsed.tool_calls
-            ):
-
-                self._handle_tool_call(
-                    tool_call=tool_call
-                )
-
-            # ------------------------------------------------
-            # Runtime termination check
-            # ------------------------------------------------
-
-            runtime_decision = (
+            raise RuntimeError(
                 self.termination_policy
-                .evaluate_runtime(
-                    self.state
-                )
+                .max_steps_error()
             )
 
-            if (
-                runtime_decision
-                .should_stop
-            ):
-                raise RuntimeError(
-                    runtime_decision.feedback
+        # ====================================================
+        # User interruption
+        # ====================================================
+
+        except KeyboardInterrupt:
+
+            if self.trace_logger is not None:
+
+                self.trace_logger.log_agent_stop(
+                    step=self.state.step,
+                    reason=(
+                        "Agent interrupted "
+                        "by user."
+                    ),
                 )
 
+            self._save_session(
+                status="interrupted"
+            )
+
+            raise
+
         # ====================================================
-        # Maximum-step termination
+        # Fatal runtime error
         # ====================================================
 
-        raise RuntimeError(
-            self.termination_policy
-            .max_steps_error()
-        )
+        except Exception as exc:
+
+            if self.trace_logger is not None:
+
+                self.trace_logger.log_error(
+                    error=str(exc),
+                    source="coding_agent",
+                    step=(
+                        self.state.step
+                        if self.state.step > 0
+                        else None
+                    ),
+                    recoverable=False,
+                )
+
+                self.trace_logger.log_agent_stop(
+                    step=self.state.step,
+                    reason=str(exc),
+                )
+
+            self._save_session(
+                status="failed",
+                error=str(exc),
+            )
+
+            raise
 
     # ========================================================
     # Tool-call handling
@@ -474,7 +729,7 @@ class CodingAgent:
 
     def _handle_tool_call(
         self,
-        tool_call,
+        tool_call: ParsedToolCall,
     ) -> None:
 
         tool_name = (
@@ -492,6 +747,32 @@ class CodingAgent:
         # ====================================================
 
         if not tool_call.is_valid:
+
+            if self.trace_logger is not None:
+
+                self.trace_logger.log_tool_call(
+                    step=self.state.step,
+                    tool_name=tool_name,
+                    arguments={},
+                    tool_call_id=(
+                        tool_call.id
+                    ),
+                )
+
+                self.trace_logger.log_error(
+                    error=(
+                        tool_call.error
+                        or (
+                            "Invalid "
+                            "tool call."
+                        )
+                    ),
+                    source=(
+                        "tool_argument_parser"
+                    ),
+                    step=self.state.step,
+                    recoverable=True,
+                )
 
             tool_result = (
                 self.error_handler
@@ -539,6 +820,30 @@ class CodingAgent:
                 ),
             )
 
+            # -----------------------------------------------
+            # Trace result
+            # -----------------------------------------------
+
+            if self.trace_logger is not None:
+
+                self.trace_logger.log_tool_result(
+                    step=self.state.step,
+                    tool_name=tool_name,
+                    result=result_data,
+                    ok=False,
+                    tool_call_id=(
+                        tool_call.id
+                    ),
+                )
+
+            # -----------------------------------------------
+            # Persist after tool observation
+            # -----------------------------------------------
+
+            self._save_session(
+                status="running"
+            )
+
             self._print_tool_result(
                 tool_result
             )
@@ -563,8 +868,27 @@ class CodingAgent:
         )
 
         # ----------------------------------------------------
+        # Trace tool call before local execution
+        # ----------------------------------------------------
+
+        if self.trace_logger is not None:
+
+            self.trace_logger.log_tool_call(
+                step=self.state.step,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_call_id=(
+                    tool_call.id
+                ),
+            )
+
+        # ----------------------------------------------------
         # Local tool execution
         # ----------------------------------------------------
+
+        tool_start = (
+            perf_counter()
+        )
 
         try:
             tool_result = (
@@ -580,12 +904,11 @@ class CodingAgent:
             )
 
         except Exception as exc:
-            # ToolRegistry already handles ordinary
-            # tool errors.
+            # ToolRegistry already handles ordinary tool errors.
             #
-            # This extra boundary prevents an unexpected
-            # registry bug from crashing the loop without
-            # producing a structured observation.
+            # This additional boundary prevents an unexpected
+            # registry implementation error from escaping without
+            # producing a structured tool observation.
 
             tool_result = (
                 self.error_handler
@@ -596,6 +919,14 @@ class CodingAgent:
                     ),
                 )
             )
+
+        tool_duration_ms = (
+            (
+                perf_counter()
+                - tool_start
+            )
+            * 1000
+        )
 
         # ----------------------------------------------------
         # Parse structured tool result
@@ -631,8 +962,77 @@ class CodingAgent:
             ),
         )
 
+        # ----------------------------------------------------
+        # Trace tool result
+        # ----------------------------------------------------
+
+        if self.trace_logger is not None:
+
+            self.trace_logger.log_tool_result(
+                step=self.state.step,
+                tool_name=tool_name,
+                result=result_data,
+                ok=bool(
+                    result_data.get(
+                        "ok"
+                    )
+                ),
+                duration_ms=(
+                    tool_duration_ms
+                ),
+                tool_call_id=(
+                    tool_call.id
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Persist history + state after each tool call
+        # ----------------------------------------------------
+
+        self._save_session(
+            status="running"
+        )
+
         self._print_tool_result(
             tool_result
+        )
+
+    # ========================================================
+    # Persistent session
+    # ========================================================
+
+    def _save_session(
+        self,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """
+        Persist the complete conversation history and runtime state.
+
+        This method is called repeatedly during execution rather than
+        only when the task finishes, so partial progress survives a
+        later runtime failure.
+        """
+
+        if self.session_id is None:
+            return
+
+        metadata = {
+            "status": status,
+        }
+
+        if error is not None:
+            metadata[
+                "error"
+            ] = error
+
+        self.session_store.save_history(
+            session_id=(
+                self.session_id
+            ),
+            history=self.history,
+            metadata=metadata,
+            state=self.state,
         )
 
     # ========================================================
